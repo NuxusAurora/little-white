@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """小白桌面宠物 - a floppy-eared white puppy that lives on your desktop.
 
-Run:  python pet.py   (or double-click run.bat)
+Run:  python3 pet.py   (Linux)
 """
 
 import os
@@ -49,9 +49,6 @@ MENU_BG = "#2b2b2b"
 MENU_FG = "#f0f0f0"
 MENU_ACTIVE_BG = "#3c6fd0"
 MENU_ACTIVE_FG = "#ffffff"
-
-IS_WIN = sys.platform.startswith("win")
-IS_LINUX = sys.platform.startswith("linux")
 
 def _seq(prefix, ms):
     files = sorted(glob.glob(os.path.join(SPR, prefix + "_*.png")))
@@ -187,104 +184,6 @@ def build_anim(cfg):
                 anim[key] = seqs[key] if _group_cfg(cfg, key)["enabled"] else []
     return anim
 
-_HWND_TOPMOST = -1
-_SWP_NOMOVE = 0x0002
-_SWP_NOSIZE = 0x0001
-_SWP_NOACTIVATE = 0x0010
-
-_ULW_ALPHA = 0x00000002
-_AC_SRC_OVER = 0x00
-_AC_SRC_ALPHA = 0x01
-
-
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-class _SIZE(ctypes.Structure):
-    _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
-
-
-class _BITMAPINFOHEADER(ctypes.Structure):
-    _fields_ = [
-        ("biSize", ctypes.c_uint32),
-        ("biWidth", ctypes.c_int32),
-        ("biHeight", ctypes.c_int32),
-        ("biPlanes", ctypes.c_uint16),
-        ("biBitCount", ctypes.c_uint16),
-        ("biCompression", ctypes.c_uint32),
-        ("biSizeImage", ctypes.c_uint32),
-        ("biXPelsPerMeter", ctypes.c_int32),
-        ("biYPelsPerMeter", ctypes.c_int32),
-        ("biClrUsed", ctypes.c_uint32),
-        ("biClrImportant", ctypes.c_uint32),
-    ]
-
-
-class _BITMAPINFO(ctypes.Structure):
-    _fields_ = [("bmiHeader", _BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 1)]
-
-
-class _BLENDFUNCTION(ctypes.Structure):
-    _fields_ = [
-        ("BlendOp", ctypes.c_ubyte),
-        ("BlendFlags", ctypes.c_ubyte),
-        ("SourceConstantAlpha", ctypes.c_ubyte),
-        ("AlphaFormat", ctypes.c_ubyte),
-    ]
-
-
-class _LayeredSurface:
-    """Per-pixel-alpha layered window: rendering AND hit-testing come from the
-    image alpha channel, so transparent pixels are click-through and opaque
-    pixels are clickable -- immune to the -transparentcolor DPI hit-test bug."""
-
-    def __init__(self, get_hwnd, width, height):
-        self.get_hwnd = get_hwnd
-        self.w, self.h = width, height
-        self.ensure_layered()
-        self.hdc = ctypes.windll.gdi32.CreateCompatibleDC(None)
-        bmi = _BITMAPINFO()
-        hdr = bmi.bmiHeader
-        hdr.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
-        hdr.biWidth = width
-        hdr.biHeight = -height  # top-down
-        hdr.biPlanes = 1
-        hdr.biBitCount = 32
-        hdr.biCompression = 0  # BI_RGB
-        hdr.biSizeImage = width * height * 4
-        self.bits = ctypes.c_void_p()
-        self.hbm = ctypes.windll.gdi32.CreateDIBSection(
-            None, ctypes.byref(bmi), 0, ctypes.byref(self.bits), None, 0)
-        self.old = ctypes.windll.gdi32.SelectObject(self.hdc, self.hbm)
-        self.blend = _BLENDFUNCTION(_AC_SRC_OVER, 0, 255, _AC_SRC_ALPHA)
-
-    def ensure_layered(self):
-        # UpdateLayeredWindow requires the WS_EX_LAYERED style. Tk sometimes
-        # rewrites the extended style (e.g. when it re-applies -topmost /
-        # -toolwindow after mapping), so re-assert it whenever we update.
-        user32 = ctypes.windll.user32
-        hwnd = self.get_hwnd()
-        exstyle = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
-        if not (exstyle & 0x00080000):
-            user32.SetWindowLongW(hwnd, -20, exstyle | 0x00080000)
-
-    def update(self, pil_rgba, x, y):
-        self.ensure_layered()
-        hwnd = self.get_hwnd()
-        pre = pil_rgba.convert("RGBa")  # premultiplied alpha
-        data = bytearray(pre.tobytes())
-        data[0::4], data[2::4] = data[2::4], data[0::4]  # RGBA -> BGRA
-        ctypes.memmove(self.bits, bytes(data), len(data))
-        ctypes.windll.user32.UpdateLayeredWindow(
-            hwnd, None,
-            ctypes.byref(_POINT(x, y)),
-            ctypes.byref(_SIZE(self.w, self.h)),
-            self.hdc,
-            ctypes.byref(_POINT(0, 0)),
-            0, ctypes.byref(self.blend), _ULW_ALPHA)
-
-
 def _flatten_key(rgba, key=KEY_RGB, alpha_min=96):
     """Flatten RGBA onto the transparent key color for Linux/X11:
     pixels below the alpha threshold become exactly the key color (click-
@@ -397,8 +296,6 @@ class _ShapeCutter:
         self._dpy = None
         self._cache = {}
         self.fail_reason = ""
-        if IS_WIN:
-            return
         try:
             lib = ctypes.CDLL("libX11.so.6")
             xext = ctypes.CDLL("libXext.so.6")
@@ -889,44 +786,9 @@ class _KeyedSurface:
         self.root.geometry("+%d+%d" % (int(x), int(y)))
 
 
-def _enable_dpi_awareness():
-    """Make the process DPI aware so the layered window hit-tests 1:1.
-    Without this, at 125%+ display scaling most of the transparent window
-    becomes click-through (clicks fall through to whatever is underneath)."""
-    if not IS_WIN:
-        return
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-
-
-def _force_topmost(hwnd):
-    if not IS_WIN:
-        return
-    try:
-        ctypes.windll.user32.SetWindowPos(
-            hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
-            _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE)
-    except Exception:
-        pass
-
-
 def _root_hwnd(root):
-    """The real OS top-level window. Tk's winfo_id() on Windows returns a
-    child window of the actual toplevel (class TkTopLevel), and Win32 window
-    APIs (layered style, UpdateLayeredWindow, topmost) must target the
-    ancestor."""
-    hwnd = root.winfo_id()
-    if not IS_WIN:
-        return hwnd
-    try:
-        return ctypes.windll.user32.GetAncestor(hwnd, 2)  # GA_ROOT
-    except Exception:
-        return hwnd
+    """X11 顶层窗口 id（就是 Tk 的 winfo_id）。"""
+    return root.winfo_id()
 
 
 class Pet:
@@ -1006,34 +868,27 @@ class Pet:
         root.geometry("%dx%d+%d+%d" % (w, h, x, y))
 
         root.overrideredirect(True)
-        if IS_WIN:
-            root.attributes("-toolwindow", True)
         root.attributes("-topmost", True)
-        root.configure(bg=MAGENTA if IS_WIN else "#000000")
-        self.linux_key_ok = _apply_linux_keycolor(root) if not IS_WIN else False
+        root.configure(bg="#000000")
+        self.linux_key_ok = _apply_linux_keycolor(root)
 
         first_idle = self.anim["idle"][0][0]
-        if IS_WIN:
-            self.label = tk.Label(root, image=self.photos[first_idle], bg=MAGENTA, bd=0)
-            self.label.pack()
-        else:
-            # Linux：不创建 Tk label——像素直接画在顶层窗口上，避免子窗口
-            # 黑底盖住绘制；事件绑定在根窗口上
-            self.label = None
+        # Linux：不创建 Tk label——像素直接画在顶层窗口上，避免子窗口
+        # 黑底盖住绘制；事件由 InputOnly 窗口轮询
+        self.label = None
         self.surface = self._make_surface(w, h)
         self.surface.update(self.composite(first_idle), self.x, self.y, first_idle)
-        if not IS_WIN:
-            shape = getattr(self.surface, "_shape", None)
-            reason = shape.fail_reason if shape is not None else "未知"
-            print("透明初始化: transparentcolor=%s SHAPE连接=%s %s | 会话=%s "
-                  "桌面=%s DISPLAY=%r 屏幕=%r" % (
-                      "是" if self.linux_key_ok else "否(Windows专属,正常)",
-                      "是" if getattr(self.surface, "_shape_ok", False) else "否",
-                      "" if not reason else "原因: " + reason,
-                      os.environ.get("XDG_SESSION_TYPE", "?"),
-                      os.environ.get("XDG_CURRENT_DESKTOP", "?"),
-                      os.environ.get("DISPLAY"),
-                      root.tk.call("winfo", "screen", ".")), file=sys.stderr)
+        shape = getattr(self.surface, "_shape", None)
+        reason = shape.fail_reason if shape is not None else "未知"
+        print("透明初始化: transparentcolor=%s SHAPE连接=%s %s | 会话=%s "
+              "桌面=%s DISPLAY=%r 屏幕=%r" % (
+                  "是" if self.linux_key_ok else "否(Windows专属,正常)",
+                  "是" if getattr(self.surface, "_shape_ok", False) else "否",
+                  "" if not reason else "原因: " + reason,
+                  os.environ.get("XDG_SESSION_TYPE", "?"),
+                  os.environ.get("XDG_CURRENT_DESKTOP", "?"),
+                  os.environ.get("DISPLAY"),
+                  root.tk.call("winfo", "screen", ".")), file=sys.stderr)
 
         event_widget = self.label if self.label is not None else root
         event_widget.bind("<ButtonPress-1>", self.on_press)
@@ -1047,7 +902,7 @@ class Pet:
         self.watch_config()
         self._start_walk_burst()
         self._ensure_fall_loop()
-        if not IS_WIN and self.label is None:
+        if self.label is None:
             self.root.after(16, self._poll_x_events)
         if not test_mode:
             self.schedule_action(2200)
@@ -1074,7 +929,7 @@ class Pet:
             gs = self.group_scale(name)
             if gs != 1.0:
                 img = self._scale_content(img, gs, target)
-            display = img if IS_WIN else _flatten_straight(img, key=LINUX_FILL)
+            display = _flatten_straight(img, key=LINUX_FILL)
             self.photos[name] = ImageTk.PhotoImage(display)
             self.frames[name] = img
             if name.startswith("walk_") or (
@@ -1082,13 +937,11 @@ class Pet:
                     (name == self.walk_group or name.startswith(self.walk_group + "_"))):
                 # right-facing variants
                 fimg = img.transpose(Image.FLIP_LEFT_RIGHT)
-                fdisplay = fimg if IS_WIN else _flatten_straight(fimg, key=LINUX_FILL)
+                fdisplay = _flatten_straight(fimg, key=LINUX_FILL)
                 self.photos[name + "_flip"] = ImageTk.PhotoImage(fdisplay)
                 self.frames[name + "_flip"] = fimg
 
     def _make_surface(self, w, h):
-        if IS_WIN:
-            return _LayeredSurface(lambda: _root_hwnd(self.root), w, h)
         return _KeyedSurface(self.root, self.label, w, h,
                              key_ok=getattr(self, "linux_key_ok", False))
 
@@ -1130,8 +983,6 @@ class Pet:
     def set_scale(self, factor):
         self.scale = max(0.7, min(2.6, self.scale * factor))
         self.build_photos()
-        if IS_WIN:
-            self.label.configure(image=self.photos[self.current_frame()])
         w, h = self.window_size()
         self.surface = self._make_surface(w, h)
         self.surface.update(self.composite(self.current_frame()), self.x, self.y,
@@ -1140,14 +991,10 @@ class Pet:
         self.root.geometry("%dx%d+%d+%d" % (w, h, self.x, self.y))
 
     def keep_topmost(self):
-        if IS_WIN:
-            self.surface.ensure_layered()
-            _force_topmost(_root_hwnd(self.root))
-        else:
-            try:
-                self.root.attributes("-topmost", True)
-            except tk.TclError:
-                pass
+        try:
+            self.root.attributes("-topmost", True)
+        except tk.TclError:
+            pass
         self.root.after(3000, self.keep_topmost)
 
     def current_frame(self):
@@ -1384,8 +1231,6 @@ class Pet:
             self.base = new_base
         self.build_photos()
         if self.anim.get(self.mode) or self.anim.get("idle"):
-            if IS_WIN:
-                self.label.configure(image=self.photos[self.current_frame()])
             self.surface.update(self.composite(self.current_frame()), self.x, self.y,
                                 self.current_frame())
 
@@ -1474,10 +1319,6 @@ class Pet:
                 name += "_flip"       # 散步贴纸: 向左移动时水平翻转
         if self.falling and walking:
             self.fi -= 1               # 冻结动画帧，只更新位置
-        if IS_WIN:
-            # Linux 上由 surface.update() 统一先切形状再画图，避免画出
-            # 未裁剪的品红底（走路时会闪品红）
-            self.label.configure(image=self.photos[name])
         self.surface.update(self.composite(name), self.x, self.y, name)
 
         if walking:
@@ -1493,21 +1334,6 @@ class Pet:
         if self.test_log:
             self.test_log.write("move %d %d\n" % (self.x, self.y))
             self.test_log.flush()
-
-    def _pixel_dark(self, x, y):
-        """Screen pixel below the feet: dark (black) = ground."""
-        if not IS_WIN:
-            return True
-        try:
-            hdc = ctypes.windll.user32.GetDC(0)
-            c = ctypes.windll.gdi32.GetPixel(hdc, int(x), int(y))
-            ctypes.windll.user32.ReleaseDC(0, hdc)
-        except Exception:
-            return True
-        if c == 0xFFFFFFFF:   # CLR_INVALID
-            return True
-        r, g, b = c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF
-        return (r + g + b) / 3 < 50
 
     def apply_gravity(self):
         """No dark pixel underfoot -> fall with v = g*t (g = GRAVITY px/s^2)."""
@@ -1531,7 +1357,7 @@ class Pet:
         cx = self.x + w // 2
         bottom = self.y + h
         near_bottom = bottom >= self.root.winfo_screenheight() - 6
-        ground = near_bottom or self._strip_has_dark(
+        ground = near_bottom or self._strip_has_floor_linux(
             cx - int(w * 0.35), bottom + 1, int(w * 0.7), 5)
         if ground:
             self.vy = 0
@@ -1545,56 +1371,6 @@ class Pet:
                 self._y_frac -= dy
                 self.move(0, dy)
             self.falling = True
-
-    def _strip_has_dark(self, x0, y0, w, h):
-        """One BitBlt grab of the strip below the pet; any dark pixel = ground."""
-        if w <= 0 or h <= 0:
-            return True
-        if not IS_WIN:
-            return self._strip_has_floor_linux(x0, y0, w, h)
-        try:
-            import numpy as np
-            user32 = ctypes.windll.user32
-            gdi32 = ctypes.windll.gdi32
-            hdc = user32.GetDC(0)
-            mdc = gdi32.CreateCompatibleDC(hdc)
-            hbm = gdi32.CreateCompatibleBitmap(hdc, w, h)
-            old = gdi32.SelectObject(mdc, hbm)
-            gdi32.BitBlt(mdc, 0, 0, w, h, hdc, int(x0), int(y0), 0x00CC0020)
-
-            class _BMI(ctypes.Structure):
-                _fields_ = [("biSize", ctypes.c_uint32),
-                            ("biWidth", ctypes.c_int32),
-                            ("biHeight", ctypes.c_int32),
-                            ("biPlanes", ctypes.c_uint16),
-                            ("biBitCount", ctypes.c_uint16),
-                            ("biCompression", ctypes.c_uint32),
-                            ("biSizeImage", ctypes.c_uint32),
-                            ("biXPelsPerMeter", ctypes.c_int32),
-                            ("biYPelsPerMeter", ctypes.c_int32),
-                            ("biClrUsed", ctypes.c_uint32),
-                            ("biClrImportant", ctypes.c_uint32)]
-            bmi = _BMI()
-            bmi.biSize = ctypes.sizeof(_BMI)
-            bmi.biWidth = w
-            bmi.biHeight = -h
-            bmi.biPlanes = 1
-            bmi.biBitCount = 32
-            bmi.biCompression = 0
-            bmi.biSizeImage = w * h * 4
-            buf = ctypes.create_string_buffer(w * h * 4)
-            gdi32.GetDIBits(mdc, hbm, 0, h, buf, ctypes.byref(bmi), 0)
-            gdi32.SelectObject(mdc, old)
-            gdi32.DeleteObject(hbm)
-            gdi32.DeleteDC(mdc)
-            user32.ReleaseDC(0, hdc)
-            arr = np.frombuffer(buf.raw, dtype=np.uint8).reshape(h, w, 4)
-            b = arr[:, :, 0].astype(np.int16)
-            g = arr[:, :, 1].astype(np.int16)
-            r = arr[:, :, 2].astype(np.int16)
-            return bool(((r + g + b) < 150).any())
-        except Exception:
-            return True
 
     def _get_xdisp(self):
         """复用 python-xlib Display 连接（每帧新建会连接泄漏，最终导致
@@ -1749,9 +1525,6 @@ class Pet:
     def _step_with_terrain(self):
         """按前方地形移动：无障碍直走；低台阶走上；中台阶跳上；
         高墙过不去就转身。跳跃上升期间保持水平移动越过障碍。"""
-        if IS_WIN:
-            self.move(self.vx, 0)
-            return
         if self.jumping:
             kind, _ = self._terrain_ahead()
             if kind != "wall":          # 跳跃中继续冲，但别穿进高墙
@@ -1800,7 +1573,7 @@ class Pet:
         覆盖宠物区域接收鼠标事件（Tk 只处理容器子窗口的事件，而容器已
         unmap；外部客户端也不能对 Tk 窗口 XSelectInput）。事件转发给
         on_press / on_drag / on_release / popup_menu。"""
-        if IS_WIN or self.label is not None:
+        if self.label is not None:
             return
         try:
             shape = getattr(self.surface, "_shape", None)
@@ -2009,7 +1782,6 @@ def main(auto_close_ms=None, test_mode=False, start_pos=None):
 
 if __name__ == "__main__":
     import sys
-    _enable_dpi_awareness()
     args = sys.argv[1:]
     pos_args = [a.split("=", 1)[1] for a in args if a.startswith("--pos=")]
     main(

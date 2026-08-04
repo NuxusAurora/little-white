@@ -28,17 +28,23 @@ RED = (255, 92, 138, 255)
 BLUE = (125, 185, 255, 255)
 ZZZ_COLOR = (122, 140, 210, 255)
 
-FONT_PATH = r"C:\Windows\Fonts\arialbd.ttf"
+FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+]
 
 # head geometry (logical px)
 HX, HY, HRX, HRY = 95, 62, 56, 50
 
 
 def _font(size):
-    try:
-        return ImageFont.truetype(FONT_PATH, size)
-    except OSError:
-        return ImageFont.load_default()
+    for p in FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(p, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def new_canvas():

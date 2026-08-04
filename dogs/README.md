@@ -4,8 +4,7 @@
 
 ## 启动
 
-- 双击 `run.bat`，或者手动运行 `python pet.py`。
-- **Linux**：`./run.sh`，或者手动运行 `python3 pet.py`（先 `chmod +x *.sh`）。
+`./run.sh`，或者手动运行 `python3 pet.py`（先 `chmod +x *.sh`）。
 
 ## 交互
 
@@ -20,7 +19,7 @@
 
 ## 动作管理（可视化）
 
-右键菜单点「管理动作…」（或双击 `manager.bat`）打开可视化管理器：
+右键菜单点「管理动作…」（或运行 `./manager.sh`）打开可视化管理器：
 
 - 动作分两类显示：**平常动作**（会自动触发：散步、睡觉、挥手、跳跃、坐下）和**特殊动作**（需要条件：待机贴纸、被摸、被拎、吃蛋糕）；类别可在行内下拉框切换；
 - 每个动作一行，带**动画预览**；
@@ -38,14 +37,14 @@
 点击小白（或直接点蛋糕）→ 蛋糕消失，小白播放「吃蛋糕」→「爱你」；
 想再喂就再右键一次。
 
-> Linux 上蛋糕不跟随鼠标（点击穿透需要 Win32 API），生成后蛋糕停在原地，
-> 直接**点击蛋糕本身**或把鼠标移到小白身上点击，都能完成喂食。
+> 蛋糕生成后停在原地，直接**点击蛋糕本身**或把鼠标移到小白身上点击，
+> 都能完成喂食。
 
 「吃蛋糕」动图素材在 `source_videos/eat.mp4`，换新素材直接覆盖同名文件后运行 `build_all.py`。
 
 ## 一键重建（抠图 + 尺寸统一）
 
-新增/替换素材后，运行 `python build_all.py`（或双击 `build.bat`）一键完成：
+新增/替换素材后，运行 `python build_all.py`（或 `./build.sh`）一键完成：
 
 1. 静态动作贴纸（`stickers_src/*.png` → walk/drag/wave/jump/sit）
 2. 待机 GIF 动图（`stickers_src/like.gif`、`chan.gif`、`aini.gif` → 喜欢/馋/爱你）
@@ -68,11 +67,11 @@
 - `build_all.py` / `normalize_sprites.py` —— 一键重建：抠图 + 尺寸统一
 - `stickers_src/` —— 表情包素材（17弹 like/chan/aini、30弹 happy，个人使用）
 - `sprites/` —— 生成的透明 PNG 动画帧
-- `run.bat` —— 一键启动（无控制台窗口）
+- `run.sh` —— 一键启动
 
-## Linux 支持
+## 桌面环境
 
-小白现在可以在 Linux 桌面上运行（X11 桌面，带合成器效果最佳，如 GNOME / KDE /
+小白在 Linux X11 桌面上运行（带合成器效果最佳，如 GNOME / KDE /
 XFCE 开启合成）。透明效果直接用 X11 的 SHAPE 扩展把 alpha 通道切成窗口形状实现，
 不再依赖 Tk 的 `-transparentcolor`（那是 Windows 专属属性，Linux 上会失效导致露出
 品红底色）；透明区域自动点击穿透，X11 和无合成器的环境、以及 XWayland 下都能用。

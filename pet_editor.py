@@ -76,12 +76,8 @@ class Editor:
         self.inner = inner
         inner.bind("<Configure>",
                    lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        if pet.IS_WIN:
-            canvas.bind_all("<MouseWheel>",
-                            lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
-        else:
-            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
         self.build_rows(inner)
 
         foot = tk.Frame(root)
@@ -265,20 +261,8 @@ class Editor:
     def restart_pet(self):
         import subprocess
         import sys as _sys
-        # 关掉正在运行的 pet.py，再重新启动
-        try:
-            subprocess.run(["powershell", "-NoProfile", "-Command",
-                            "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe'\" "
-                            "| Where-Object { $_.CommandLine -like '*pet.py*' -and "
-                            "$_.CommandLine -notlike '*pet_editor*' } "
-                            "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
-                           capture_output=True, timeout=10)
-        except Exception:
-            pass
-        pythonw = os.path.join(os.path.dirname(_sys.executable), "pythonw.exe")
-        if not os.path.exists(pythonw):
-            pythonw = _sys.executable
-        subprocess.Popen([pythonw, os.path.join(HERE, "pet.py")])
+        # 重新启动小白（pet.py 的单实例锁会自动终止旧实例）
+        subprocess.Popen([_sys.executable, os.path.join(HERE, "pet.py")])
         self.status.config(text="已重启小白 ✓")
 
 

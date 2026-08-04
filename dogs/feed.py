@@ -6,21 +6,10 @@
 
 import json
 import os
-import sys
 
 
 def _cursor_pos():
-    """鼠标位置：Windows 用 Win32 API，Linux 用隐藏 Tk 窗口查询 X11 指针。"""
-    if sys.platform.startswith("win"):
-        import ctypes
-        from ctypes import wintypes
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # 与桌宠坐标一致
-        except Exception:
-            pass
-        pt = wintypes.POINT()
-        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-        return int(pt.x), int(pt.y)
+    """鼠标位置：用隐藏 Tk 窗口查询 X11 指针。"""
     import tkinter as tk
     r = tk.Tk()
     r.withdraw()
