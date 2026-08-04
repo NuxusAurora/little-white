@@ -30,7 +30,7 @@ GRAVITY = 1000.0             # px / s^2, v = g*t
 BG_SIZE = 500
 BG_QUANT = 16                # 每通道量化步长（4bit -> 4096 个颜色桶）
 FLOOR_RATIO = 0.05           # 脚下 strip 中非背景像素占比超过它 = 有地板
-BG_REFRESH_S = 0.2          # 背景聚类最短刷新间隔（秒）
+BG_REFRESH_S = 0.1          # 背景聚类最短刷新间隔（秒）
 
 # 前方地形：探测前进方向的非背景轮廓，决定直走 / 上台阶 / 跳跃 / 转身。
 TERRAIN_PROBE = 8            # 前方探测的水平偏移（px）
@@ -853,6 +853,9 @@ class Pet:
         self._xdisp = None            # 复用的 python-xlib Display
         self.jumping = False          # 跳跃中：只受重力、不检测地面
         self._jump_y0 = 0             # 起跳时的 y
+        self._stuck_pos = None               # 卡住检测：上次坐标快照
+        self._stuck_since = 0                # 坐标未变化起始时刻
+        self._next_jump_t = 0                # 周期性跳跃：下次跳跃时刻
         self._turn_cooldown = 0       # 转身冷却（tick 数）
         self._turn_x = None           # 上次转身时的 x
         self._menu_open = False       # 右键菜单弹出中（InputOnly 暂不抢占）
@@ -865,6 +868,7 @@ class Pet:
             y = root.winfo_screenheight() - h - 60
         self.x, self.y = x, y
         self.clamp()
+        self._stuck_pos = (self.x, self.y)
         root.geometry("%dx%d+%d+%d" % (w, h, x, y))
 
         root.overrideredirect(True)
@@ -1121,6 +1125,7 @@ class Pet:
         self.vy = 0
         self._y_frac = 0.0
         self._last_grav = time.monotonic()
+        self._next_jump_t = time.monotonic() + random.uniform(3, 10)
 
     def _is_walk_display(self, name):
         if self.mode == "walk":
@@ -1159,14 +1164,26 @@ class Pet:
 
     def _fall_loop(self):
         """持续检测重力/地形：任何显示模式下小白悬空都会下落。
-        走路时保持高频（16ms）让下落平滑；跳跃期间高频水平推进越过台阶。"""
+        走路时保持高频（16ms）让下落平滑；跳跃期间高频水平推进穿过障碍；
+        散步时每 3~10 秒自动跳一次；走着却 1 秒没挪窝（卡住）也跳。"""
         try:
             if self._is_walk_display(self.current_frame()):
                 if self.jumping:
-                    # 跳跃期间：高频水平推进越过台阶，但别穿进高墙
-                    kind, _ = self._terrain_ahead()
-                    if kind != "wall":
-                        self.move(self.vx, 0)
+                    # 跳跃期间：高频水平推进，保持水平速度穿过障碍
+                    self.move(self.vx, 0)
+                elif self.walk_state == "walk" and self.vx and not self.drag_off:
+                    now = time.monotonic()
+                    if now >= self._next_jump_t:
+                        # 周期性跳跃：每 3~10 秒跳一次
+                        self._start_jump()
+                    else:
+                        # 卡住检测：散步中坐标 1 秒没变 -> 触发跳跃脱困
+                        pos = (self.x, self.y)
+                        if pos != self._stuck_pos:
+                            self._stuck_pos = pos
+                            self._stuck_since = now
+                        elif now - self._stuck_since >= 1.0:
+                            self._start_jump()
             self.apply_gravity()
             self.root.after(16, self._fall_loop)
         except Exception:
@@ -1470,38 +1487,31 @@ class Pet:
         except Exception:
             return True   # 无法抓屏时视为始终有地面（不坠落）
 
-    def _terrain_ahead(self):
-        """探测前进方向的非背景轮廓，返回 (kind, height)。
-        kind: "none" 无障碍 / "step" 低台阶(<=CLIMB_MAX) / "jump" 中台阶
-        (<=JUMP_MAX) / "wall" 高墙(过不去)。"""
+    def _probe_nonbg_top(self, x0, y0, w, h):
+        """抓取一块屏幕区域，返回最上方"非背景"像素的行号；
+        没有非背景像素或抓屏失败时返回 None。"""
         self._update_bg_linux()
         info = getattr(self, "_bg_info", None)
         if info is None:
-            return ("none", 0)
-        w, h = self.window_size()
-        direction = 1 if self.vx > 0 else -1
-        foot = self.y + h
-        scan_h = h + 24
-        px = self.x + (w if direction > 0 else 0) + direction * TERRAIN_PROBE
-        x0 = px if direction > 0 else px - 8
+            return None
         try:
             import numpy as np
             from Xlib import X
             d = self._get_xdisp()
             if d is None:
-                return ("none", 0)
+                return None
             raw = d.screen().root.get_image(
-                int(x0), int(foot - scan_h + 1), 8, scan_h,
+                int(x0), int(y0), int(w), int(h),
                 X.ZPixmap, 0xffffffff)
             data = raw.data
-            if len(data) == 8 * scan_h * 4:
-                arr = np.frombuffer(data, dtype=np.uint8).reshape(scan_h, 8, 4)
+            if len(data) == w * h * 4:
+                arr = np.frombuffer(data, dtype=np.uint8).reshape(h, w, 4)
                 rgb = arr[:, :, :3][:, :, ::-1].astype(np.int16)
-            elif len(data) == 8 * scan_h * 3:
-                arr = np.frombuffer(data, dtype=np.uint8).reshape(scan_h, 8, 3)
+            elif len(data) == w * h * 3:
+                arr = np.frombuffer(data, dtype=np.uint8).reshape(h, w, 3)
                 rgb = arr.astype(np.int16)
             else:
-                return ("none", 0)
+                return None
             bq = tuple(c // BG_QUANT for c in info["rgb"])
             q = rgb // BG_QUANT
             floor = ((q[..., 0] != bq[0]) |
@@ -1509,26 +1519,61 @@ class Pet:
                      (q[..., 2] != bq[2]))
             rows = np.where(floor.any(axis=1))[0]
             if len(rows) == 0:
-                return ("none", 0)
-            top_y = foot - scan_h + 1 + int(rows.min())
-            if top_y >= foot - 2:
-                return ("none", 0)      # 只有脚下同高的地面，不是障碍
-            obstacle_h = foot - top_y
-            if obstacle_h <= CLIMB_MAX:
-                return ("step", obstacle_h)
-            if obstacle_h <= JUMP_MAX:
-                return ("jump", obstacle_h)
-            return ("wall", obstacle_h)
+                return None
+            return y0 + int(rows.min())
         except Exception:
+            return None
+
+    def _terrain_ahead(self):
+        """探测前进方向的非背景轮廓，返回 (kind, height)。
+        kind: "none" 无障碍 / "step" 低台阶(<=CLIMB_MAX) / "jump" 中台阶
+        (<=JUMP_MAX) / "wall" 高墙(过不去)。"""
+        w, h = self.window_size()
+        direction = 1 if self.vx > 0 else -1
+        foot = self.y + h
+        scan_h = h + 24
+        px = self.x + (w if direction > 0 else 0) + direction * TERRAIN_PROBE
+        x0 = px if direction > 0 else px - 8
+        top_y = self._probe_nonbg_top(x0, foot - scan_h + 1, 8, scan_h)
+        if top_y is None:
             return ("none", 0)
+        if top_y >= foot - 2:
+            return ("none", 0)      # 只有脚下同高的地面，不是障碍
+        obstacle_h = foot - top_y
+        if obstacle_h <= CLIMB_MAX:
+            return ("step", obstacle_h)
+        if obstacle_h <= JUMP_MAX:
+            return ("jump", obstacle_h)
+        return ("wall", obstacle_h)
+
+    def _inside_wall(self):
+        """小白是否已身处墙中：运动反方向（身后）也有高墙。
+        是 -> 前方探测到的"墙"其实是穿行中的墙体内部，继续走即可。"""
+        w, h = self.window_size()
+        direction = 1 if self.vx > 0 else -1
+        foot = self.y + h
+        scan_h = h + 24
+        px = self.x + (0 if direction > 0 else w)
+        x0 = px - 8 if direction > 0 else px
+        top_y = self._probe_nonbg_top(x0, foot - scan_h + 1, 8, scan_h)
+        if top_y is None:
+            return False
+        obstacle_h = foot - top_y
+        return obstacle_h > JUMP_MAX
+
+    def _start_jump(self):
+        """开始物理跳跃：受重力上抛，跳跃期间保持水平速度穿过障碍。"""
+        self.jumping = True
+        self._jump_y0 = self.y
+        self.vy = -JUMP_SPEED
+        self._next_jump_t = time.monotonic() + random.uniform(3, 10)
 
     def _step_with_terrain(self):
         """按前方地形移动：无障碍直走；低台阶走上；中台阶跳上；
-        高墙过不去就转身。跳跃上升期间保持水平移动越过障碍。"""
+        高墙过不去就转身；已进入墙内则继续走穿过去。"""
         if self.jumping:
-            kind, _ = self._terrain_ahead()
-            if kind != "wall":          # 跳跃中继续冲，但别穿进高墙
-                self.move(self.vx, 0)
+            # 跳跃中继续冲：保持水平速度，即使有障碍也穿过去
+            self.move(self.vx, 0)
             return
         if self._turn_cooldown > 0:
             self._turn_cooldown -= 1
@@ -1540,11 +1585,13 @@ class Pet:
             self.move(self.vx, 0)
         elif kind == "jump":
             if not self.jumping:
-                self.jumping = True
-                self._jump_y0 = self.y
-                self.vy = -JUMP_SPEED
+                self._start_jump()
             self.move(self.vx, 0)
         else:   # wall
+            if self._inside_wall():
+                # 已经进入墙里：前方墙是墙体内部，别停/转身，继续走穿过去
+                self.move(self.vx, 0)
+                return
             if self._turn_cooldown > 0:
                 return                  # 刚转身过：站住，冷却后再决定
             if self._turn_x is not None and abs(self.x - self._turn_x) < 15:
