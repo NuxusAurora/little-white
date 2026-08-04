@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+_pet_test.log
+_cake_request.json

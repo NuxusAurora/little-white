@@ -1,0 +1,52 @@
+{
+  "groups": {
+    "like": {
+      "name": "散步",
+      "enabled": true,
+      "scale": 1.2,
+      "category": "normal"
+    },
+    "chan": {
+      "name": "馋",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "aini": {
+      "name": "爱你",
+      "enabled": true,
+      "scale": 0.9,
+      "category": "special"
+    },
+    "sleep": {
+      "name": "睡觉",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "normal"
+    },
+    "walk": {
+      "name": "跳舞",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "drag": {
+      "name": "被拎",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "eat": {
+      "name": "吃蛋糕",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "kunkun": {
+      "name": "困困",
+      "enabled": true,
+      "scale": 0.9,
+      "category": "special"
+    }
+  }
+}
