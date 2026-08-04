@@ -25,6 +25,31 @@ LINUX_FILL = (0, 0, 0)       # Linux 上透明区填充色（形状切掉后不�
 BASE_W, BASE_H = 190, 180    # sprite canvas size
 GRAVITY = 1000.0             # px / s^2, v = g*t
 
+# 下落/落地判定：以小白为中心抓取周围 BG_SIZE 像素，颜色量化聚类后，
+# 占比最高的一类视为背景板，其余颜色都算可踩的地板。
+BG_SIZE = 500
+BG_QUANT = 16                # 每通道量化步长（4bit -> 4096 个颜色桶）
+FLOOR_RATIO = 0.05           # 脚下 strip 中非背景像素占比超过它 = 有地板
+BG_REFRESH_S = 1.0          # 背景聚类最短刷新间隔（秒）
+
+# 前方地形：探测前进方向的非背景轮廓，决定直走 / 上台阶 / 跳跃 / 转身。
+TERRAIN_PROBE = 8            # 前方探测的水平偏移（px）
+CLIMB_MAX = 24               # 可直接走上台阶的最大高度（px）
+JUMP_MAX = 100               # 可跳上台阶的最大高度（px）
+JUMP_HEIGHT = 100            # 统一跳跃高度（px）
+JUMP_SPEED = int((2 * GRAVITY * JUMP_HEIGHT) ** 0.5)   # 统一起跳初速度
+
+# 右键菜单字体与配色：Tk 默认菜单字体会回退到位图 fixed（高 DPI 下很糊），
+# 显式指定 Xft 字体（DejaVu Sans，中文自动回退到系统中文字体）即可抗锯齿。
+# 右键菜单字体：这个 Tk 只支持 X core 字体（无 Xft），中文字体里
+# "song ti"（宋体）在 36pt 内能完整显示且清晰；DejaVu 等西文字体
+# 中文会缺字/方块。
+MENU_FONT = ("song ti", 36)
+MENU_BG = "#2b2b2b"
+MENU_FG = "#f0f0f0"
+MENU_ACTIVE_BG = "#3c6fd0"
+MENU_ACTIVE_FG = "#ffffff"
+
 IS_WIN = sys.platform.startswith("win")
 IS_LINUX = sys.platform.startswith("linux")
 
@@ -60,6 +85,28 @@ FRAME_NAMES = sorted(os.path.splitext(os.path.basename(f))[0]
                      for f in glob.glob(os.path.join(SPR, "*.png")))
 
 CONFIG_PATH = os.path.join(HERE, "pet_config.json")
+LOCK_FILE = os.path.join(HERE, ".pet.lock")
+
+
+def _single_instance():
+    """单实例锁：已有小白在跑就先终止它，再启动新的，避免堆积垃圾进程。"""
+    try:
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE, "r", encoding="utf-8") as f:
+                pid = int((f.read() or "0").strip() or 0)
+            if pid and pid != os.getpid():
+                try:
+                    with open("/proc/%d/cmdline" % pid, "rb") as f:
+                        if b"pet.py" in f.read():
+                            os.kill(pid, 15)      # SIGTERM
+                            time.sleep(0.5)
+                except Exception:
+                    pass
+        with open(LOCK_FILE, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        return True
+    except Exception:
+        return True
 DEFAULT_CONFIG = {
     "groups": {
         "like":  {"name": "喜欢", "enabled": True, "category": "normal"},
@@ -940,6 +987,13 @@ class Pet:
         self.kunkun_plays = 0
         self.sticker_seq = []
         self._input_win = None        # Linux 鼠标事件接收用的 InputOnly 窗口
+        self._bg_info = None          # Linux 背景色聚类缓存
+        self._xdisp = None            # 复用的 python-xlib Display
+        self.jumping = False          # 跳跃中：只受重力、不检测地面
+        self._jump_y0 = 0             # 起跳时的 y
+        self._turn_cooldown = 0       # 转身冷却（tick 数）
+        self._turn_x = None           # 上次转身时的 x
+        self._menu_open = False       # 右键菜单弹出中（InputOnly 暂不抢占）
 
         w, h = self.window_size()
         if start_pos is not None:
@@ -1246,7 +1300,7 @@ class Pet:
                     self._play_kunkun()
                     return
             else:
-                self.move(self.vx, 0)
+                self._step_with_terrain()
         elif now >= self.rest_until:
             self._start_walk_burst()
         self._ensure_fall_loop()
@@ -1257,16 +1311,19 @@ class Pet:
             self.root.after(16, self._fall_loop)
 
     def _fall_loop(self):
-        """High-frequency position updates while the 散步 display is active:
-        falling stays smooth (60fps) instead of following the animation rate."""
+        """持续检测重力/地形：任何显示模式下小白悬空都会下落。
+        走路时保持高频（16ms）让下落平滑；跳跃期间高频水平推进越过台阶。"""
         try:
             if self._is_walk_display(self.current_frame()):
-                self.apply_gravity()
-                self.root.after(16, self._fall_loop)
-                return
+                if self.jumping:
+                    # 跳跃期间：高频水平推进越过台阶，但别穿进高墙
+                    kind, _ = self._terrain_ahead()
+                    if kind != "wall":
+                        self.move(self.vx, 0)
+            self.apply_gravity()
+            self.root.after(16, self._fall_loop)
         except Exception:
-            pass
-        self._fall_active = False
+            self._fall_active = False
 
     def sleep(self):
         if self.falling:
@@ -1341,7 +1398,20 @@ class Pet:
             pass
 
     def restart_pet(self):
-        """重启小白：启动新进程后退出当前进程。"""
+        """重启小白：先释放 InputOnly 事件窗口和单实例锁（否则新进程的
+        事件窗口会被旧窗口挡住、鼠标无响应），再启动新进程并退出当前。"""
+        if self._input_win:
+            try:
+                self._input_win[1].destroy()
+                self._input_win[0].flush()
+            except Exception:
+                pass
+            self._input_win = None
+        try:
+            if os.path.exists(LOCK_FILE):
+                os.remove(LOCK_FILE)
+        except Exception:
+            pass
         try:
             subprocess = __import__("subprocess")
             subprocess.Popen([sys.executable, os.path.abspath(__file__)])
@@ -1444,12 +1514,25 @@ class Pet:
         now = time.monotonic()
         dt = min(now - self._last_grav, 0.25) if self._last_grav else 0.0
         self._last_grav = now
+        if self.jumping:
+            # 跳跃中：只受重力，不检测脚下地面，直到落回起跳高度
+            self.vy += GRAVITY * dt
+            self._y_frac += self.vy * dt
+            dy = int(self._y_frac)
+            if dy:
+                self._y_frac -= dy
+                self.move(0, dy)
+            if self.vy >= 0 and self.y >= self._jump_y0:
+                self.jumping = False
+                self.vy = 0
+            self.falling = False
+            return
         w, h = self.window_size()
         cx = self.x + w // 2
         bottom = self.y + h
         near_bottom = bottom >= self.root.winfo_screenheight() - 6
         ground = near_bottom or self._strip_has_dark(
-            cx - int(w * 0.35), bottom + 2, int(w * 0.7), 42)
+            cx - int(w * 0.35), bottom + 1, int(w * 0.7), 5)
         if ground:
             self.vy = 0
             self._y_frac = 0.0
@@ -1468,7 +1551,7 @@ class Pet:
         if w <= 0 or h <= 0:
             return True
         if not IS_WIN:
-            return self._strip_has_dark_linux(x0, y0, w, h)
+            return self._strip_has_floor_linux(x0, y0, w, h)
         try:
             import numpy as np
             user32 = ctypes.windll.user32
@@ -1513,28 +1596,189 @@ class Pet:
         except Exception:
             return True
 
-    def _strip_has_dark_linux(self, x0, y0, w, h):
-        """X11: grab the strip below the pet via python-xlib (optional);
-        without it we assume ground is always present so the pet never falls."""
+    def _get_xdisp(self):
+        """复用 python-xlib Display 连接（每帧新建会连接泄漏，最终导致
+        鼠标事件轮询失效）。"""
+        if getattr(self, "_xdisp", None) is None:
+            try:
+                from Xlib import display as _xd
+                self._xdisp = _xd.Display()
+            except Exception:
+                self._xdisp = None
+        return self._xdisp
+
+    def _update_bg_linux(self):
+        """X11: 抓取小白周围 BG_SIZE x BG_SIZE 的像素，把 RGB 量化成
+        4096 个颜色桶，占比最高的桶作为"背景板"颜色（含相似桶）。
+        结果缓存到 self._bg_info，固定每 BG_REFRESH_S 秒刷新一次。"""
+        now = time.monotonic()
+        info = getattr(self, "_bg_info", None)
+        if info and now - info["t"] < BG_REFRESH_S:
+            return
         try:
             import numpy as np
-            from Xlib import X, display
-            d = display.Display()
+            from Xlib import X
+            w, h = self.window_size()
+            cx, cy = self.x + w // 2, self.y + h // 2
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            half = BG_SIZE // 2
+            x0 = max(0, cx - half)
+            y0 = max(0, cy - half)
+            x1 = min(sw, cx + half)
+            y1 = min(sh, cy + half)
+            ww, hh = x1 - x0, y1 - y0
+            if ww <= 0 or hh <= 0:
+                return
+            d = self._get_xdisp()
+            if d is None:
+                return
+            raw = d.screen().root.get_image(
+                x0, y0, ww, hh, X.ZPixmap, 0xffffffff)
+            data = raw.data
+            if len(data) == ww * hh * 4:
+                arr = np.frombuffer(data, dtype=np.uint8).reshape(hh, ww, 4)
+                rgb = arr[:, :, :3][:, :, ::-1].astype(np.int16)
+            elif len(data) == ww * hh * 3:
+                arr = np.frombuffer(data, dtype=np.uint8).reshape(hh, ww, 3)
+                rgb = arr.astype(np.int16)
+            else:
+                return
+            q = rgb // BG_QUANT
+            flat = q[..., 0] * 256 + q[..., 1] * 16 + q[..., 2]
+            counts = np.bincount(flat.ravel(), minlength=16 ** 3)
+            top = int(counts.argmax())
+            top_rgb = (
+                (top // 256) * BG_QUANT,
+                ((top // 16) % 16) * BG_QUANT,
+                (top % 16) * BG_QUANT)
+            self._bg_info = {
+                "t": now, "x": self.x, "y": self.y,
+                "rgb": top_rgb, "ratio": float(counts[top] / counts.sum()),
+            }
+        except Exception:
+            pass
+
+    def _strip_has_floor_linux(self, x0, y0, w, h):
+        """X11: 抓取小白脚下 strip，统计"非背景色"（地板）像素占比；
+        占比超过 FLOOR_RATIO 就认为有地板可踩。"""
+        self._update_bg_linux()
+        info = getattr(self, "_bg_info", None)
+        if info is None:
+            return True   # 拿不到背景时视为始终有地面（不坠落）
+        try:
+            import numpy as np
+            from Xlib import X
+            d = self._get_xdisp()
+            if d is None:
+                return True
             raw = d.screen().root.get_image(
                 int(x0), int(y0), int(w), int(h), X.ZPixmap, 0xffffffff)
             data = raw.data
             if len(data) == w * h * 4:
                 arr = np.frombuffer(data, dtype=np.uint8).reshape(h, w, 4)
+                rgb = arr[:, :, :3][:, :, ::-1].astype(np.int16)
             elif len(data) == w * h * 3:
                 arr = np.frombuffer(data, dtype=np.uint8).reshape(h, w, 3)
+                rgb = arr.astype(np.int16)
             else:
                 return True
-            b = arr[:, :, 0].astype(np.int16)
-            g = arr[:, :, 1].astype(np.int16)
-            r = arr[:, :, 2].astype(np.int16)
-            return bool(((r + g + b) < 150).any())
+            # 按量化桶判同类：与背景量化到同一桶的像素 = 背景，
+            # 其他 = 地板。渐变/相近色自然归为一类。
+            bq = tuple(c // BG_QUANT for c in info["rgb"])
+            q = rgb // BG_QUANT
+            floor = ((q[..., 0] != bq[0]) |
+                     (q[..., 1] != bq[1]) |
+                     (q[..., 2] != bq[2]))
+            return bool(floor.mean() > FLOOR_RATIO)
         except Exception:
             return True   # 无法抓屏时视为始终有地面（不坠落）
+
+    def _terrain_ahead(self):
+        """探测前进方向的非背景轮廓，返回 (kind, height)。
+        kind: "none" 无障碍 / "step" 低台阶(<=CLIMB_MAX) / "jump" 中台阶
+        (<=JUMP_MAX) / "wall" 高墙(过不去)。"""
+        self._update_bg_linux()
+        info = getattr(self, "_bg_info", None)
+        if info is None:
+            return ("none", 0)
+        w, h = self.window_size()
+        direction = 1 if self.vx > 0 else -1
+        foot = self.y + h
+        scan_h = h + 24
+        px = self.x + (w if direction > 0 else 0) + direction * TERRAIN_PROBE
+        x0 = px if direction > 0 else px - 8
+        try:
+            import numpy as np
+            from Xlib import X
+            d = self._get_xdisp()
+            if d is None:
+                return ("none", 0)
+            raw = d.screen().root.get_image(
+                int(x0), int(foot - scan_h + 1), 8, scan_h,
+                X.ZPixmap, 0xffffffff)
+            data = raw.data
+            if len(data) == 8 * scan_h * 4:
+                arr = np.frombuffer(data, dtype=np.uint8).reshape(scan_h, 8, 4)
+                rgb = arr[:, :, :3][:, :, ::-1].astype(np.int16)
+            elif len(data) == 8 * scan_h * 3:
+                arr = np.frombuffer(data, dtype=np.uint8).reshape(scan_h, 8, 3)
+                rgb = arr.astype(np.int16)
+            else:
+                return ("none", 0)
+            bq = tuple(c // BG_QUANT for c in info["rgb"])
+            q = rgb // BG_QUANT
+            floor = ((q[..., 0] != bq[0]) |
+                     (q[..., 1] != bq[1]) |
+                     (q[..., 2] != bq[2]))
+            rows = np.where(floor.any(axis=1))[0]
+            if len(rows) == 0:
+                return ("none", 0)
+            top_y = foot - scan_h + 1 + int(rows.min())
+            if top_y >= foot - 2:
+                return ("none", 0)      # 只有脚下同高的地面，不是障碍
+            obstacle_h = foot - top_y
+            if obstacle_h <= CLIMB_MAX:
+                return ("step", obstacle_h)
+            if obstacle_h <= JUMP_MAX:
+                return ("jump", obstacle_h)
+            return ("wall", obstacle_h)
+        except Exception:
+            return ("none", 0)
+
+    def _step_with_terrain(self):
+        """按前方地形移动：无障碍直走；低台阶走上；中台阶跳上；
+        高墙过不去就转身。跳跃上升期间保持水平移动越过障碍。"""
+        if IS_WIN:
+            self.move(self.vx, 0)
+            return
+        if self.jumping:
+            kind, _ = self._terrain_ahead()
+            if kind != "wall":          # 跳跃中继续冲，但别穿进高墙
+                self.move(self.vx, 0)
+            return
+        if self._turn_cooldown > 0:
+            self._turn_cooldown -= 1
+        kind, height = self._terrain_ahead()
+        if kind == "none":
+            self.move(self.vx, 0)
+        elif kind == "step":
+            self.y -= height
+            self.move(self.vx, 0)
+        elif kind == "jump":
+            if not self.jumping:
+                self.jumping = True
+                self._jump_y0 = self.y
+                self.vy = -JUMP_SPEED
+            self.move(self.vx, 0)
+        else:   # wall
+            if self._turn_cooldown > 0:
+                return                  # 刚转身过：站住，冷却后再决定
+            if self._turn_x is not None and abs(self.x - self._turn_x) < 15:
+                return                  # 转身后几乎没动 -> 被困，站住不抖
+            self.vx = -self.vx          # 转身
+            self._turn_x = self.x
+            self._turn_cooldown = 25
 
     def clamp(self):
         w, h = self.window_size()
@@ -1606,11 +1850,16 @@ class Pet:
                         self.on_drag(e)
                     elif t == _X.ButtonRelease and e.num == 1:
                         self.on_release(e)
-        except Exception:
-            pass
+        except Exception as e:
+            if os.environ.get("PET_EV_DEBUG"):
+                import traceback
+                traceback.print_exc()
         self.root.after(16, self._poll_x_events)
 
     def on_press(self, event):
+        if os.environ.get("PET_EV_DEBUG"):
+            print("EV: on_press xr=%d yr=%d" % (event.x_root, event.y_root),
+                  file=sys.stderr)
         if self.priority_until_idle:
             return   # 馋/吃蛋糕播放中，不响应点击
         self.wake()
@@ -1629,6 +1878,9 @@ class Pet:
             self.test_log.flush()
 
     def on_drag(self, event):
+        if os.environ.get("PET_EV_DEBUG"):
+            print("EV: on_drag xr=%d x=%d" % (event.x_root, self.x),
+                  file=sys.stderr)
         if self.drag_off:
             if self.test_log:
                 self.test_log.write("motion %d %d\n" % (event.x_root, event.y_root))
@@ -1668,7 +1920,31 @@ class Pet:
             self.show_heart()
 
     def popup_menu(self, event):
-        menu = tk.Menu(self.root, tearoff=0)
+        menu = tk.Menu(self.root, tearoff=0,
+                       font=MENU_FONT,
+                       bg=MENU_BG, fg=MENU_FG,
+                       activebackground=MENU_ACTIVE_BG,
+                       activeforeground=MENU_ACTIVE_FG)
+        # 菜单弹出期间隐藏 InputOnly 事件窗口：它每帧被 raise 到最上层，
+        # 会盖住菜单、让"退出"等菜单项点不到
+        self._menu_open = True
+        if self._input_win:
+            try:
+                self._input_win[1].unmap()
+                self._input_win[0].flush()
+            except Exception:
+                pass
+
+        def _close(_e=None):
+            self._menu_open = False
+            if self._input_win:
+                try:
+                    self._input_win[1].map()
+                    self._input_win[0].flush()
+                except Exception:
+                    pass
+        menu.bind("<Unmap>", _close)
+
         def free(fn):
             return fn if not self.priority_until_idle else (lambda: None)
         # idle stickers by their custom names
@@ -1705,6 +1981,8 @@ class Pet:
 
 
 def main(auto_close_ms=None, test_mode=False, start_pos=None):
+    if not test_mode:
+        _single_instance()
     root = tk.Tk()
     root.withdraw()
     pet = Pet(root, test_mode=test_mode, start_pos=start_pos)
@@ -1716,7 +1994,17 @@ def main(auto_close_ms=None, test_mode=False, start_pos=None):
         cake.install(root, pet)
     if auto_close_ms:
         root.after(auto_close_ms, root.destroy)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        if not test_mode:
+            try:
+                if os.path.exists(LOCK_FILE):
+                    with open(LOCK_FILE, "r", encoding="utf-8") as f:
+                        if f.read().strip() == str(os.getpid()):
+                            os.remove(LOCK_FILE)   # 只删自己的锁
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
