@@ -534,6 +534,38 @@ class _ShapeCutter:
             w = parent_ret.value
         return w
 
+    def create_input_window(self, x, y, w, h):
+        """创建不可见的 InputOnly 窗口覆盖宠物区域，用于接收鼠标事件。
+        InputOnly 窗口不显示、不遮挡渲染；我们自己创建，可以自由选择
+        事件（外部客户端对 Tk 窗口 XSelectInput 会 BadAccess）。用
+        python-xlib 创建（ctypes 直接调 XCreateWindow 会段错误）。
+        返回 (Display, Window) 或 None。"""
+        try:
+            from Xlib import X, display as _xd
+            d = _xd.Display()
+            r = d.screen().root
+            win = r.create_window(
+                int(x), int(y), max(1, int(w)), max(1, int(h)), 0, 0, 2,
+                event_mask=(X.ButtonPressMask | X.ButtonReleaseMask |
+                            X.PointerMotionMask),
+                override_redirect=1)
+            win.map()
+            d.flush()
+            return (d, win)
+        except Exception:
+            return None
+
+    def move_input_window(self, io, x, y):
+        """让 InputOnly 窗口跟随宠物移动，并保持在最上层。"""
+        if not io:
+            return
+        try:
+            d, win = io
+            win.configure(x=int(x), y=int(y))
+            d.flush()
+        except Exception:
+            pass
+
     def _children(self, win_id):
         """返回指定窗口的直接子窗口 id 列表（ctypes XQueryTree）。"""
         lib, dpy = self._lib, self._dpy
@@ -907,6 +939,7 @@ class Pet:
         self.sleep_prep = False       # 散步→困困→睡觉 流程进行中
         self.kunkun_plays = 0
         self.sticker_seq = []
+        self._input_win = None        # Linux 鼠标事件接收用的 InputOnly 窗口
 
         w, h = self.window_size()
         if start_pos is not None:
@@ -960,6 +993,8 @@ class Pet:
         self.watch_config()
         self._start_walk_burst()
         self._ensure_fall_loop()
+        if not IS_WIN and self.label is None:
+            self.root.after(16, self._poll_x_events)
         if not test_mode:
             self.schedule_action(2200)
 
@@ -1516,6 +1551,65 @@ class Pet:
             self.y = sh - h
 
     # ---------------------------------------------------------------- mouse
+    def _poll_x_events(self):
+        """Linux 自绘窗口的鼠标事件轮询：用一个不可见的 InputOnly 窗口
+        覆盖宠物区域接收鼠标事件（Tk 只处理容器子窗口的事件，而容器已
+        unmap；外部客户端也不能对 Tk 窗口 XSelectInput）。事件转发给
+        on_press / on_drag / on_release / popup_menu。"""
+        if IS_WIN or self.label is not None:
+            return
+        try:
+            shape = getattr(self.surface, "_shape", None)
+            if shape is None or not shape.ok:
+                self.root.after(16, self._poll_x_events)
+                return
+            dpy = shape._dpy
+            if self._input_win is None:
+                w, h = self.window_size()
+                self._input_win = shape.create_input_window(
+                    self.x, self.y, w, h)
+                if os.environ.get("PET_EV_DEBUG"):
+                    print("EV: input win=%s" % (
+                        hex(self._input_win[1].id)
+                        if self._input_win else None), file=sys.stderr)
+            else:
+                shape.move_input_window(self._input_win, self.x, self.y)
+            if self._input_win:
+                from Xlib import X as _X
+                d, _win = self._input_win
+                while d.pending_events():
+                    ev = d.next_event()
+                    t = ev.type
+                    if os.environ.get("PET_EV_DEBUG"):
+                        print("EV: type=%s detail=%s root=(%s,%s)" % (
+                            t, getattr(ev, "detail", None),
+                            getattr(ev, "root_x", None),
+                            getattr(ev, "root_y", None)), file=sys.stderr)
+                    from types import SimpleNamespace
+                    e = SimpleNamespace(
+                        x_root=getattr(ev, "root_x", 0),
+                        y_root=getattr(ev, "root_y", 0),
+                        x=getattr(ev, "x", 0), y=getattr(ev, "y", 0),
+                        num=getattr(ev, "detail", 0),
+                        state=getattr(ev, "state", 0))
+                    if t == _X.ButtonPress:
+                        if e.num == 1:
+                            now = int(self.root.tk.call("clock", "milliseconds"))
+                            if (self._press_time is not None and
+                                    now - self._press_time < 350):
+                                self.on_double(e)
+                            else:
+                                self.on_press(e)
+                        elif e.num == 3:
+                            self.popup_menu(e)
+                    elif t == _X.MotionNotify and self.drag_off:
+                        self.on_drag(e)
+                    elif t == _X.ButtonRelease and e.num == 1:
+                        self.on_release(e)
+        except Exception:
+            pass
+        self.root.after(16, self._poll_x_events)
+
     def on_press(self, event):
         if self.priority_until_idle:
             return   # 馋/吃蛋糕播放中，不响应点击
@@ -1594,6 +1688,9 @@ class Pet:
             menu.add_command(label=_group_cfg(self.cfg, "sleep")["name"],
                              command=free(self.sleep))
         menu.add_command(label="醒来", command=self.wake)
+        if getattr(self, "cake", None):
+            menu.add_command(label="拿取蛋糕",
+                             command=free(self.cake.spawn_near_me))
         menu.add_command(label="重启小白", command=self.restart_pet)
         menu.add_command(label="管理动作…", command=self.open_editor)
         menu.add_separator()

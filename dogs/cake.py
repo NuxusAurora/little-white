@@ -153,6 +153,11 @@ class Cake:
         _raise_top(pet._root_hwnd(self.win))
         self.surface.update(self.cake_img, self.cake_x, self.cake_y)
 
+    def spawn_near_me(self):
+        """右键小白菜单触发：在小白的右侧生成一块蛋糕。"""
+        w, h = self.pet.window_size()
+        self.spawn_at(self.pet.x + w + 10, self.pet.y + h // 2)
+
     def hide(self):
         self.active = False
         self.was_near = False

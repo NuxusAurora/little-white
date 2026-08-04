@@ -34,11 +34,9 @@
 
 ## 蛋糕投喂
 
-没有桌子了，改用命令生成蛋糕：
-
-- 在项目目录的 cmd 里输入 **`cake`**（或 `python feed.py`）→ 在鼠标指针位置生成一块蛋糕；
-- 把鼠标移到小白身上，**点击小白** → 蛋糕消失，小白播放「吃蛋糕」→「爱你」；
-- 想再喂就再输入一次 `cake`。
+**右键小白，在菜单里点「拿取蛋糕」** → 在小白的右侧生成一块蛋糕；
+点击小白（或直接点蛋糕）→ 蛋糕消失，小白播放「吃蛋糕」→「爱你」；
+想再喂就再右键一次。
 
 > Linux 上蛋糕不跟随鼠标（点击穿透需要 Win32 API），生成后蛋糕停在原地，
 > 直接**点击蛋糕本身**或把鼠标移到小白身上点击，都能完成喂食。
@@ -86,7 +84,8 @@ sudo apt install python3 python3-tk python3-pil python3-numpy
 pip install opencv-python rembg
 ```
 
-- 想让小白从桌沿「坠落」：再装 `pip install python-xlib`（可选，不装则始终站在地面上）；
+- **Linux 鼠标交互**（拖拽、右键菜单）依赖 `pip install python-xlib`；
+  装了之后小白也能从桌沿「坠落」；
 - Wayland 会话下建议通过 XWayland 运行（大多数发行版默认开启）；
 - 快捷脚本：`./run.sh`（启动）、`./build.sh`（重建动画）、`./manager.sh`（动作管理）、
   `./cake.sh`（生成蛋糕）。
