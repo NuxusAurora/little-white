@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.pet.lock
+_pet_test.log

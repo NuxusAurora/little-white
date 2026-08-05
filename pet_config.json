@@ -1,0 +1,76 @@
+{
+  "groups": {
+    "walk": {
+      "name": "散步",
+      "enabled": true,
+      "scale": 1.2,
+      "category": "normal"
+    },
+    "dance": {
+      "name": "跳舞",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "chan": {
+      "name": "馋",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "aini": {
+      "name": "爱你",
+      "enabled": true,
+      "scale": 0.9,
+      "category": "special"
+    },
+    "sleep": {
+      "name": "睡觉",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "normal"
+    },
+    "drag": {
+      "name": "被拎",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "wave": {
+      "name": "挥手",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "normal"
+    },
+    "jump": {
+      "name": "跳跃",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "eat": {
+      "name": "吃蛋糕",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "kunkun": {
+      "name": "困困",
+      "enabled": true,
+      "scale": 0.9,
+      "category": "special"
+    },
+    "home": {
+      "name": "回家",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "kuku": {
+      "name": "哭哭",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    }
+  }
+}
