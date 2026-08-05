@@ -50,9 +50,11 @@ def place(src, scale_extra=1.0, y_off=0, align_bottom=True):
 
 
 def save(img, name):
-    os.makedirs(OUT, exist_ok=True)
-    img.save(os.path.join(OUT, name))
-    print("saved", name)
+    stem = name.split("_")[0]           # idle_0 -> idle, drag -> drag
+    d = os.path.join(OUT, stem)         # 每个动作一个文件夹
+    os.makedirs(d, exist_ok=True)
+    img.save(os.path.join(d, name))
+    print("saved", os.path.join(stem, name))
 
 
 def main():

@@ -50,36 +50,52 @@ MENU_FG = "#f0f0f0"
 MENU_ACTIVE_BG = "#3c6fd0"
 MENU_ACTIVE_FG = "#ffffff"
 
+
+def _sprite_files(pattern):
+    """sprites 目录下的文件；动作已按文件夹存放（sprites/<动作>/），递归查找。"""
+    return sorted(glob.glob(os.path.join(SPR, "**", pattern), recursive=True))
+
+
+def _find_sprite(name):
+    """按文件名（不含路径）在 sprites 下递归查找，返回完整路径或 None。"""
+    files = _sprite_files(name + ".png")
+    return files[0] if files else None
+
+
 def _seq(prefix, ms):
-    files = sorted(glob.glob(os.path.join(SPR, prefix + "_*.png")))
+    files = _sprite_files(prefix + "_*.png")
     return [(os.path.splitext(os.path.basename(f))[0], ms) for f in files]
 
 
-_MS = {"like": 70, "chan": 70, "aini": 70, "happy": 33,
-       "sleep": 31, "sleepb": 150, "eat": 33, "kunkun": 56}
+_MS = {"walk": 70, "chan": 70, "aini": 70, "happy": 33,
+       "sleep": 31, "sleepb": 150, "eat": 33, "kunkun": 56,
+       "wave": 50, "home": 50, "kuku": 66}
 
 
 def _seqs():
     """Frame sequences for every group, re-globbed from sprites/ each call so
     deleted actions disappear and re-added ones appear."""
     seqs = {g: _seq(g, ms) for g, ms in _MS.items()}
-    seqs["walk"] = [("walk_%d" % i, 105) for i in range(4)
-                    if os.path.exists(os.path.join(SPR, "walk_%d.png" % i))]
-    seqs["drag"] = [("drag", 120)] if os.path.exists(os.path.join(SPR, "drag.png")) else []
-    seqs["wave"] = [("wave", 150)] * 4 if os.path.exists(os.path.join(SPR, "wave.png")) else []
+    # 散步用 like.gif 拆出来的帧（walk_*.png）；没有视频/动图素材时才回退
+    seqs["walk"] = _seq("walk", _MS["walk"]) or \
+        ([("walk", 150)] * 4 if _find_sprite("walk") else [])
+    seqs["drag"] = [("drag", 120)] if _find_sprite("drag") else []
+    # 挥手优先用视频帧（wave_*.png），没有视频素材时才回退到静态贴纸
+    seqs["wave"] = _seq("wave", _MS["wave"]) or \
+        ([("wave", 150)] * 4 if _find_sprite("wave") else [])
     seqs["jump"] = [("jump", 100), ("jump", 110), ("jump", 180)] \
-        if os.path.exists(os.path.join(SPR, "jump.png")) else []
-    seqs["sit"] = [("sit", 260)] * 4 if os.path.exists(os.path.join(SPR, "sit.png")) else []
+        if _find_sprite("jump") else []
+    seqs["sit"] = [("sit", 260)] * 4 if _find_sprite("sit") else []
     return seqs
 
 
 SEQ = _seqs()
 
-IDLE_ORDER = ["like", "chan", "aini"]   # idle plays these in order
+IDLE_ORDER = ["walk", "chan", "aini"]   # idle plays these in order
 ONE_SHOT = {"happy", "wave", "jump", "sit", "eat"}
         # one-shot actions return to idle when finished ("eat" continues to 爱你)
 FRAME_NAMES = sorted(os.path.splitext(os.path.basename(f))[0]
-                     for f in glob.glob(os.path.join(SPR, "*.png")))
+                     for f in _sprite_files("*.png"))
 
 CONFIG_PATH = os.path.join(HERE, "pet_config.json")
 LOCK_FILE = os.path.join(HERE, ".pet.lock")
@@ -106,7 +122,7 @@ def _single_instance():
         return True
 DEFAULT_CONFIG = {
     "groups": {
-        "like":  {"name": "喜欢", "enabled": True, "category": "normal"},
+        "walk":  {"name": "散步", "enabled": True, "category": "normal"},
         "chan":  {"name": "馋",   "enabled": True, "category": "normal"},
         "aini":  {"name": "爱你", "enabled": True, "category": "normal"},
         "happy": {"name": "开心", "enabled": True, "category": "special"},
@@ -118,6 +134,8 @@ DEFAULT_CONFIG = {
         "sit":   {"name": "坐下", "enabled": True, "category": "normal"},
         "eat":   {"name": "吃蛋糕", "enabled": True, "category": "special"},
         "kunkun": {"name": "困困", "enabled": True, "category": "special"},
+        "home":  {"name": "回家", "enabled": True, "category": "special"},
+        "kuku":  {"name": "哭哭", "enabled": True, "category": "special"},
     }
 }
 
@@ -506,6 +524,7 @@ class _ShapeCutter:
         try:
             d, win = io
             win.configure(x=int(x), y=int(y))
+            win.raise_window()
             d.flush()
         except Exception:
             pass
@@ -796,8 +815,8 @@ class Pet:
         self.root = root
         self.base = {}
         for n in FRAME_NAMES:
-            p = os.path.join(SPR, n + ".png")
-            if os.path.exists(p):
+            p = _find_sprite(n)
+            if p:
                 self.base[n] = Image.open(p)
         self.frames = {}
         self.test_mode = test_mode
@@ -838,9 +857,15 @@ class Pet:
         self._fall_active = False
         self.priority_until_idle = False
         self.eat_flow = False
+        self.eat_plays = 0            # 吃蛋糕动画播放次数（播两遍）
+        self._going_cake = False      # 正在跳向蛋糕
+        self._cake_chan_wait = False  # 看到蛋糕先播「馋」，播完再跳过去
+        self._cake_jump_bonus = 0     # 够不到蛋糕时，每次加跳高度（px）
         self.drag_off = None
         self._press_time = None
         self._press_pos = None
+        self._drag_from_special = False   # 拖拽前处于 睡觉/想回家/吃蛋糕
+        self._dragged = False             # 本次按下后是否真的拖动过
         self.heart_job = None
         self.heart_visible = False
         self.wake_job = None
@@ -859,6 +884,18 @@ class Pet:
         self._turn_cooldown = 0       # 转身冷却（tick 数）
         self._turn_x = None           # 上次转身时的 x
         self._menu_open = False       # 右键菜单弹出中（InputOnly 暂不抢占）
+        self.home = None              # 小白之家（home.install 挂上）
+        self.going_home = False       # 正在走回小家的路上
+        self.at_home = False          # 已回到小家（窗口隐藏中）
+        self._home_dialog = None      # 「我想回家」确认框
+        self._desktop_dialog = None   # 「先回桌面好不好」确认框
+        self.wave_loops = 0           # 弹窗期间挥手已播完的遍数
+        self.sad_prep = False         # 被拒绝回家：哭哭→困困→睡觉 流程中
+        self.sad_kunkun = False       # 哭完后的困困播放中
+        self.kuku_plays = 0
+        self._home_ask_t = time.monotonic() + random.uniform(60, 180)
+        self._home_target_x = None    # 回家目标 x（门中心）
+        self._home_target_y = None    # 回家目标 y（地面高度）
 
         w, h = self.window_size()
         if start_pos is not None:
@@ -899,13 +936,16 @@ class Pet:
         event_widget.bind("<B1-Motion>", self.on_drag)
         event_widget.bind("<ButtonRelease-1>", self.on_release)
         event_widget.bind("<Double-Button-1>", self.on_double)
-        event_widget.bind("<Button-3>", self.popup_menu)
+        # 右键在“松开”时才弹菜单：按下/松开右键只会开菜单，不会被当成
+        # 点击去激活菜单项；菜单项只能用左键点击触发
+        event_widget.bind("<ButtonRelease-3>", self.popup_menu)
 
         self.tick()
         self.keep_topmost()
         self.watch_config()
         self._start_walk_burst()
         self._ensure_fall_loop()
+        self.root.after(500, self._check_want_home)
         if self.label is None:
             self.root.after(16, self._poll_x_events)
         if not test_mode:
@@ -1035,9 +1075,10 @@ class Pet:
         self._asleep = False
 
     def eat(self):
-        """被投喂蛋糕：播放「吃蛋糕」；素材缺失时直接播放「爱你」."""
+        """被喂食：播放「吃蛋糕」两遍；素材缺失时直接播放「爱你」."""
         self.wake()
         self.eat_flow = True
+        self.eat_plays = 0
         if self.anim.get("eat"):
             self.set_mode("eat")
         else:
@@ -1135,6 +1176,8 @@ class Pet:
 
     def _walk_step(self):
         now = time.monotonic()
+        if self.going_home or self._going_cake:
+            return   # 回家/去蛋糕的移动由 _fall_loop 高频驱动
         if self.mode == "walk" and now >= self.walk_mode_until:
             if self.sleep_prep:
                 self._play_kunkun()
@@ -1143,18 +1186,10 @@ class Pet:
                 # 让睡觉等平常动作能继续自动触发
                 self.set_mode("idle")
             return
-        if self.walk_state == "walk":
-            if now >= self.walk_until:
-                self.walk_state = "rest"
-                self.rest_until = now + random.uniform(3, 8)
-                self.vx = 0
-                if self.sleep_prep:
-                    self._play_kunkun()
-                    return
-            else:
-                self._step_with_terrain()
-        elif now >= self.rest_until:
+        # 散步中永不停歇：不进入「休息」状态，持续按地形移动
+        if self.walk_state != "walk":
             self._start_walk_burst()
+        self._step_with_terrain()
         self._ensure_fall_loop()
 
     def _ensure_fall_loop(self):
@@ -1163,15 +1198,28 @@ class Pet:
             self.root.after(16, self._fall_loop)
 
     def _fall_loop(self):
-        """持续检测重力/地形：任何显示模式下小白悬空都会下落。
-        走路时保持高频（16ms）让下落平滑；跳跃期间高频水平推进穿过障碍；
-        散步时每 3~10 秒自动跳一次；走着却 1 秒没挪窝（卡住）也跳。"""
+        """持续检测重力/地形：下落是最高优先级，任何动作下悬空都会下落。
+        每帧先算重力，再处理各动作的水平移动；只有直线回家豁免重力
+        （用户要求无视地板规则）。单帧出错也不能让下落停掉，继续调度。"""
         try:
-            if self._is_walk_display(self.current_frame()):
-                if self.jumping:
+            if self.at_home:
+                self.root.after(16, self._fall_loop)
+                return
+            # 下落优先：悬空就先落，再执行动作的水平移动
+            if not self.going_home:
+                self.apply_gravity()
+            if self.jumping:
+                if self._going_cake:
+                    self._step_cake()
+                elif self.going_home or self._is_walk_display(self.current_frame()):
                     # 跳跃期间：高频水平推进，保持水平速度穿过障碍
                     self.move(self.vx, 0)
-                elif self.walk_state == "walk" and self.vx and not self.drag_off:
+            elif self._going_cake:
+                self._step_cake()
+            elif self.going_home:
+                self._step_home()        # 直线回家：无视地板/地形规则
+            elif self._is_walk_display(self.current_frame()):
+                if self.walk_state == "walk" and self.vx and not self.drag_off:
                     now = time.monotonic()
                     if now >= self._next_jump_t:
                         # 周期性跳跃：每 3~10 秒跳一次
@@ -1184,10 +1232,11 @@ class Pet:
                             self._stuck_since = now
                         elif now - self._stuck_since >= 1.0:
                             self._start_jump()
-            self.apply_gravity()
             self.root.after(16, self._fall_loop)
         except Exception:
-            self._fall_active = False
+            # 单帧出错不能让下落停掉：继续调度
+            self._fall_active = True
+            self.root.after(16, self._fall_loop)
 
     def sleep(self):
         if self.falling:
@@ -1206,6 +1255,9 @@ class Pet:
             self.wake_job = None
         self.sleep_prep = False
         self.kunkun_plays = 0
+        self.sad_prep = False
+        self.sad_kunkun = False
+        self.kuku_plays = 0
         if self.mode == "sleep":
             self.set_mode("idle")
 
@@ -1219,6 +1271,367 @@ class Pet:
     def hide_heart(self):
         self.heart_visible = False
         self.heart_job = None
+
+    # ------------------------------------------------------------ 小白之家
+    def _check_want_home(self):
+        """玩一会儿（60~180 秒）后想回家：弹确认框问用户。"""
+        try:
+            self._ensure_fall_loop()   # 兜底：下落循环万一停了立刻重启
+            if (self.home and not self.at_home and not self.going_home
+                    and not self._going_cake
+                    and self._home_dialog is None
+                    and self._desktop_dialog is None
+                    and not self.drag_off and not self._asleep
+                    and not self.priority_until_idle
+                    and time.monotonic() >= self._home_ask_t):
+                self._open_dialog("home")
+            elif not self.drag_off and not self.priority_until_idle:
+                if (self._home_dialog_open() and self.anim.get("wave")
+                        and self.mode != "wave"):
+                    # 对话框还开着：被其它动作打断后继续挥手
+                    self.set_mode("wave")
+                elif (self._desktop_dialog_open() and self.anim.get("wave")
+                        and self.mode != "wave"):
+                    # 二次询问还开着：被打断后继续挥手
+                    self.set_mode("wave")
+        except Exception:
+            pass
+        self.root.after(500, self._check_want_home)
+
+    def _home_dialog_open(self):
+        dlg = self._home_dialog
+        if dlg is None:
+            return False
+        try:
+            return dlg.winfo_exists()
+        except Exception:
+            return False
+
+    def _desktop_dialog_open(self):
+        dlg = self._desktop_dialog
+        if dlg is None:
+            return False
+        try:
+            return dlg.winfo_exists()
+        except Exception:
+            return False
+
+    def _desktop_showing(self):
+        """X11 EWMH：根窗口 _NET_SHOWING_DESKTOP == 1 表示桌面已显示。"""
+        try:
+            from Xlib import Xatom
+            d = self._get_xdisp()
+            if d is None:
+                return True
+            prop = d.screen().root.get_full_property(
+                d.intern_atom("_NET_SHOWING_DESKTOP"), Xatom.CARDINAL)
+            return bool(prop and prop.value and prop.value[0])
+        except Exception:
+            return True
+
+    def _open_dialog(self, kind):
+        """弹确认框。kind='home' 第一次问回家；kind='desktop' 不在桌面时再问。"""
+        attr = "_%s_dialog" % kind
+        if getattr(self, attr, None) is not None:
+            try:
+                if getattr(self, attr).winfo_exists():
+                    return
+            except Exception:
+                pass
+        self.wave_loops = 0           # 每次询问重新计数挥手遍数
+        if kind == "home":
+            text = "汪汪～我想回家，可以带我回家吗？"
+            anim = "wave"
+        else:
+            text = "小白找不到家，先回桌面好不好"
+            anim = "wave"
+        # 弹窗期间循环播放对应动画
+        if self.anim.get(anim) and self.mode != anim:
+            self.set_mode(anim)
+        dlg = tk.Toplevel(self.root)
+        setattr(self, attr, dlg)
+        dlg.title("小白之家")
+        dlg.overrideredirect(True)      # 无边框气泡，悬在头顶
+        dlg.attributes("-topmost", True)
+        dlg.configure(bg=MENU_BG)
+        dlg.resizable(False, False)
+        dlg.protocol("WM_DELETE_WINDOW",
+                     lambda: self._answer_dialog(kind, dlg, False))
+        tk.Label(dlg, text=text,
+                 bg=MENU_BG, fg=MENU_FG, font=("song ti", 18),
+                 padx=28, pady=20).pack()
+        btns = tk.Frame(dlg, bg=MENU_BG)
+        btns.pack(pady=(0, 18))
+        yes = tk.Button(btns, text="是", width=6, font=("song ti", 16),
+                        bg=MENU_ACTIVE_BG, fg=MENU_ACTIVE_FG,
+                        activebackground=MENU_ACTIVE_BG,
+                        activeforeground=MENU_ACTIVE_FG,
+                        command=lambda: self._answer_dialog(kind, dlg, True))
+        no = tk.Button(btns, text="否", width=6, font=("song ti", 16),
+                       bg=MENU_BG, fg=MENU_FG,
+                       activebackground=MENU_ACTIVE_BG,
+                       activeforeground=MENU_ACTIVE_FG,
+                       command=lambda: self._answer_dialog(kind, dlg, False))
+        yes.pack(side="left", padx=10)
+        no.pack(side="left", padx=10)
+        dlg.bind("<Return>", lambda e: self._answer_dialog(kind, dlg, True))
+        dlg.bind("<Escape>", lambda e: self._answer_dialog(kind, dlg, False))
+        dlg.update_idletasks()
+        self._place_home_dialog(dlg)
+        self.root.after(60, lambda: self._follow_dialog(kind))
+        try:
+            dlg.grab_set()
+            dlg.focus_set()
+        except Exception:
+            pass
+
+    def _place_home_dialog(self, dlg):
+        """把「我想回家」对话框摆在小白头顶（顶部放不下就放脚下）。"""
+        try:
+            w, h = self.window_size()
+            dw, dh = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+            x = self.x + w // 2 - dw // 2
+            y = self.y - dh - 6
+            if y < 0:
+                y = self.y + h + 6
+            sw = self.root.winfo_screenwidth()
+            x = max(2, min(x, sw - dw - 2))
+            dlg.geometry("+%d+%d" % (x, y))
+            dlg.lift()
+        except Exception:
+            pass
+
+    def _follow_dialog(self, kind):
+        """对话框跟随小白移动（每 60ms 对齐一次头顶位置）。"""
+        dlg = getattr(self, "_%s_dialog" % kind, None)
+        if dlg is None:
+            return
+        try:
+            if not dlg.winfo_exists():
+                setattr(self, "_%s_dialog" % kind, None)
+                return
+            self._place_home_dialog(dlg)
+        except Exception:
+            pass
+        self.root.after(60, lambda: self._follow_dialog(kind))
+
+    def _answer_dialog(self, kind, dlg, go):
+        attr = "_%s_dialog" % kind
+        if dlg is not getattr(self, attr, None):
+            return
+        setattr(self, attr, None)
+        try:
+            dlg.grab_release()
+            dlg.destroy()
+        except Exception:
+            pass
+        if kind == "home":
+            if go:
+                if self._desktop_showing():
+                    # 已经在桌面：直接回家
+                    import home
+                    home.show_desktop()
+                    self.go_home()
+                else:
+                    # 不在桌面：再问一次「先回桌面」
+                    self._open_dialog("desktop")
+            else:
+                self._start_sad_flow()     # 两次回答里有一次「否」
+        else:
+            if go:
+                import home
+                home.show_desktop()       # 回到桌面后直线回家
+                self.go_home()
+            else:
+                self._start_sad_flow()     # 两次回答里有一次「否」
+
+    def _start_sad_flow(self):
+        """被拒绝回家：哭哭两遍 → 困困一遍 → 睡觉。"""
+        if self.sad_prep or self.sad_kunkun or self._asleep:
+            return
+        self.wave_loops = 0
+        self.wake()
+        self.priority_until_idle = False
+        self._home_ask_t = time.monotonic() + random.uniform(60, 180)
+        self.sad_prep = True
+        self.kuku_plays = 0
+        if self.anim.get("kuku"):
+            self.play_sticker("kuku")
+        else:
+            self._play_sad_kunkun()
+
+    def _play_sad_kunkun(self):
+        """哭完两遍 → 困困一遍 → 睡觉。"""
+        self.sad_prep = False
+        self.kuku_plays = 0
+        if self.anim.get("kunkun"):
+            self.sad_kunkun = True
+            self.play_sticker("kunkun")
+        else:
+            self.sleep()
+
+    def _close_home_dialogs(self):
+        """关掉所有回家询问对话框（挥手超时无人回答时调用）。"""
+        for attr in ("_home_dialog", "_desktop_dialog"):
+            dlg = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if dlg is not None:
+                try:
+                    dlg.grab_release()
+                    dlg.destroy()
+                except Exception:
+                    pass
+
+    def go_home(self):
+        """开始走回小屋：面向小屋，一路走过去（可跳/穿墙）。"""
+        if not self.home:
+            return
+        self.wake()
+        self.priority_until_idle = False
+        self.eat_flow = False
+        self._going_cake = False
+        self.going_home = True
+        self.at_home = False
+        self._home_ask_t = float("inf")
+        w, h = self.window_size()
+        self._home_target_x = max(0, min(
+            self.home.door_x() - w // 2,
+            self.root.winfo_screenwidth() - w))
+        # 目标在右下角家门口：y 落到地面线，避免只往右跑然后悬空消失
+        self._home_target_y = max(0, min(
+            self.home.ground_y() - h,
+            self.root.winfo_screenheight() - h))
+        if self.anim.get("home"):
+            self.set_mode("home")        # 用「回家」专属动作
+        elif self.anim.get("walk"):
+            self.set_mode("walk")
+        self.walk_state = "walk"
+        self.vx = int(6 * self.scale) if self._home_target_x > self.x \
+            else -int(6 * self.scale)
+        if self.vx == 0:
+            self.vx = 1 if self._home_target_x > self.x else -1
+
+    def _step_home(self):
+        """回家路上的一步：一步能到就进门，否则无视地板/地形，
+        斜线直线走向右下角家门口（x 对齐门中心、y 落到地面）。"""
+        tx, ty = self._home_target_x, self._home_target_y
+        vy = 6 * self.scale
+        if (abs(self.x - tx) <= abs(self.vx)
+                and abs(self.y - ty) <= max(1, vy)):
+            self.move(tx - self.x, ty - self.y)
+            self._arrive_home()
+            return
+        dx = self.vx if abs(self.x - tx) > abs(self.vx) else (tx - self.x)
+        if self.y < ty:
+            dy = min(vy, ty - self.y)
+        elif self.y > ty:
+            dy = -min(vy, self.y - ty)
+        else:
+            dy = 0
+        self.move(dx, dy)
+
+    def go_to_cake(self):
+        """蛋糕生成后：先播放「馋」，播完再跳过去吃（碰到自动开吃）。"""
+        c = self.cake
+        if not c or not c.active:
+            return
+        self.wake()
+        self.priority_until_idle = False
+        self.going_home = False
+        self._going_cake = False
+        self._cake_chan_wait = True
+        if self.anim.get("chan"):
+            self.play_sticker("chan")
+        else:
+            self._finish_cake_chan()
+
+    def _finish_cake_chan(self):
+        """馋播完：开始跳向蛋糕（碰到会自动开吃）。"""
+        self._cake_chan_wait = False
+        c = self.cake
+        if not c or not c.active:
+            return
+        self.priority_until_idle = False
+        self._cake_jump_bonus = 0
+        self._going_cake = True
+        if self.anim.get("walk"):
+            self.set_mode("walk")
+        self.walk_state = "walk"
+        self._start_jump()
+
+    def _step_cake(self):
+        """跳向蛋糕的一步：碰到就自动开吃，否则朝蛋糕方向继续推进；
+        落回地面还没碰到就再次起跳（每次 +20px 跳高），直到够到蛋糕。"""
+        c = self.cake
+        if not c or not c.active:
+            self._cake_jump_bonus = 0
+            self._going_cake = False
+            return
+        if c.touching_pet():
+            self._cake_jump_bonus = 0    # 拿到了就恢复默认跳高
+            self._going_cake = False
+            c.feed()
+            return
+        cx = c.cake_center()[0]
+        px = self.x + self.window_size()[0] // 2
+        self.vx = int(3 * self.scale) if cx > px else -int(3 * self.scale)
+        if self.vx == 0:
+            self.vx = 1 if cx > px else -1
+        if not self.jumping:
+            # 没碰到 -> 下一次跳高 +20px，直到拿到蛋糕
+            self._cake_jump_bonus += 20
+            self._start_jump(JUMP_HEIGHT + self._cake_jump_bonus)
+        self.move(self.vx, 0)
+
+    def _arrive_home(self):
+        """走到门口：躲进小屋（窗口隐藏），等主人敲门。"""
+        self.going_home = False
+        self.at_home = True
+        self.vx = 0
+        self.vy = 0
+        self._home_target_x = None
+        self.set_mode("idle")
+        try:
+            self.root.withdraw()
+            if self._input_win:
+                self._input_win[1].unmap()
+                self._input_win[0].flush()
+        except Exception:
+            pass
+        if self.home:
+            self.home.bubble("回家啦～")
+
+    def come_out(self):
+        """主人敲了主目录（开门）：从右下角冒出来，开心一下再正常玩。"""
+        if not self.at_home or not self.home:
+            return
+        if self.root.winfo_ismapped():
+            # 小白已经出现在桌面上：绝不重复出来，避免“第二个小白”
+            return
+        self.at_home = False
+        self.going_home = False
+        self.x, self.y = self.home.appear_xy()
+        self.clamp()
+        self.root.geometry("+%d+%d" % (self.x, self.y))
+        try:
+            self.root.deiconify()
+            self.root.lift()
+        except Exception:
+            pass
+        if self._input_win:
+            try:
+                self._input_win[1].map()
+                self._input_win[1].raise_window()
+                self._input_win[0].flush()
+            except Exception:
+                pass
+        self._home_ask_t = time.monotonic() + random.uniform(60, 180)
+        self.wake()
+        self.priority_until_idle = False
+        self.schedule_action(1500)
+        if self.anim.get("happy"):
+            self.set_mode("happy")
+            self.show_heart()
 
     def watch_config(self):
         """Reload pet_config.json when the editor saves it."""
@@ -1241,8 +1654,8 @@ class Pet:
         the current per-group size factors."""
         new_base = {}
         for n in FRAME_NAMES:
-            p = os.path.join(SPR, n + ".png")
-            if os.path.exists(p):
+            p = _find_sprite(n)
+            if p:
                 new_base[n] = Image.open(p)
         if new_base:
             self.base = new_base
@@ -1295,6 +1708,24 @@ class Pet:
                     else:
                         self._play_kunkun()
                         seq = self.sticker_seq
+                elif self.sad_prep:
+                    # 被拒绝回家：哭哭要连播两遍
+                    self.kuku_plays += 1
+                    if self.kuku_plays >= 2:
+                        self._play_sad_kunkun()
+                        seq = self.sticker_seq
+                    else:
+                        self.play_sticker("kuku")
+                        seq = self.sticker_seq
+                elif self.sad_kunkun:
+                    # 哭完后的困困播一遍就睡觉
+                    self.sad_kunkun = False
+                    self.sleep()
+                    seq = self.anim["sleep"] or self.anim["idle"]
+                elif self._cake_chan_wait:
+                    # 看到蛋糕后的「馋」播完：跳过去吃
+                    self._finish_cake_chan()
+                    seq = self.anim.get(self.mode) or self.anim["idle"]
                 else:
                     self.set_mode("idle")
                     seq = self.anim["idle"]
@@ -1305,16 +1736,35 @@ class Pet:
                 seq = self.anim["idle"]
             if self.mode in ONE_SHOT and self.fi >= len(seq):
                 if self.mode == "eat":
-                    # 吃完蛋糕 -> 无缝切换到「爱你」（不经过待机帧）
-                    if self.anim.get("aini"):
+                    self.eat_plays += 1
+                    if self.eat_plays < 2:
+                        # 吃蛋糕动画播放两遍
+                        self.fi = 0
+                        seq = self.anim["eat"]
+                    elif self.anim.get("aini"):
+                        # 吃完两遍 -> 无缝切换到「爱你」（不经过待机帧）
                         self.play_sticker("aini")
                         seq = self.sticker_seq
                     else:
                         self.set_mode("idle")
                         seq = self.anim["idle"]
                 else:
-                    self.set_mode("idle")
-                    seq = self.anim["idle"]
+                    if (self.mode == "wave"
+                            and (self._home_dialog_open()
+                                 or self._desktop_dialog_open())):
+                        # 对话框还没回答：循环播放挥手；
+                        # 连续播完 10 遍还没人回答 -> 关掉对话框，哭哭→睡觉
+                        self.wave_loops += 1
+                        if self.wave_loops >= 10:
+                            self._close_home_dialogs()
+                            self._start_sad_flow()
+                            seq = self.sticker_seq or self.anim["idle"]
+                        else:
+                            self.fi = 0
+                            seq = self.anim[self.mode]
+                    else:
+                        self.set_mode("idle")
+                        seq = self.anim["idle"]
 
         if self.mode == "sleep" and (self._asleep or self.fi >= len(seq)):
             # finished falling asleep: blanket breathes until woken
@@ -1332,7 +1782,10 @@ class Pet:
             if name.startswith("walk_"):
                 if self.vx > 0:
                     name += "_flip"   # side-view: face the walking direction
-            elif self.vx < 0:
+            elif (self.walk_group
+                    and (name == self.walk_group
+                         or name.startswith(self.walk_group + "_"))
+                    and self.vx < 0):
                 name += "_flip"       # 散步贴纸: 向左移动时水平翻转
         if self.falling and walking:
             self.fi -= 1               # 冻结动画帧，只更新位置
@@ -1561,11 +2014,12 @@ class Pet:
         obstacle_h = foot - top_y
         return obstacle_h > JUMP_MAX
 
-    def _start_jump(self):
+    def _start_jump(self, height=None):
         """开始物理跳跃：受重力上抛，跳跃期间保持水平速度穿过障碍。"""
         self.jumping = True
         self._jump_y0 = self.y
-        self.vy = -JUMP_SPEED
+        h = JUMP_HEIGHT if height is None else height
+        self.vy = -int((2 * GRAVITY * h) ** 0.5)
         self._next_jump_t = time.monotonic() + random.uniform(3, 10)
 
     def _step_with_terrain(self):
@@ -1588,17 +2042,22 @@ class Pet:
                 self._start_jump()
             self.move(self.vx, 0)
         else:   # wall
-            if self._inside_wall():
-                # 已经进入墙里：前方墙是墙体内部，别停/转身，继续走穿过去
+            if self.going_home or self._inside_wall():
+                # 已进入墙里 / 回家路上：继续走穿过去
                 self.move(self.vx, 0)
                 return
             if self._turn_cooldown > 0:
-                return                  # 刚转身过：站住，冷却后再决定
+                # 刚转身：朝新方向继续走，不停
+                self.move(self.vx, 0)
+                return
             if self._turn_x is not None and abs(self.x - self._turn_x) < 15:
-                return                  # 转身后几乎没动 -> 被困，站住不抖
+                # 转身后几乎没动 -> 被卡住：跳起来穿过去，别原地停
+                self._start_jump()
+                return
             self.vx = -self.vx          # 转身
             self._turn_x = self.x
             self._turn_cooldown = 25
+            self.move(self.vx, 0)       # 转身后立即继续走
 
     def clamp(self):
         w, h = self.window_size()
@@ -1621,6 +2080,16 @@ class Pet:
         unmap；外部客户端也不能对 Tk 窗口 XSelectInput）。事件转发给
         on_press / on_drag / on_release / popup_menu。"""
         if self.label is not None:
+            return
+        if self.at_home:
+            # 在家（隐藏）时不接收鼠标事件
+            if self._input_win:
+                try:
+                    self._input_win[1].unmap()
+                    self._input_win[0].flush()
+                except Exception:
+                    pass
+            self.root.after(16, self._poll_x_events)
             return
         try:
             shape = getattr(self.surface, "_shape", None)
@@ -1664,12 +2133,14 @@ class Pet:
                                 self.on_double(e)
                             else:
                                 self.on_press(e)
-                        elif e.num == 3:
-                            self.popup_menu(e)
                     elif t == _X.MotionNotify and self.drag_off:
                         self.on_drag(e)
-                    elif t == _X.ButtonRelease and e.num == 1:
-                        self.on_release(e)
+                    elif t == _X.ButtonRelease:
+                        if e.num == 1:
+                            self.on_release(e)
+                        elif e.num == 3:
+                            # 右键只弹菜单，不触发其它动作
+                            self.popup_menu(e)
         except Exception as e:
             if os.environ.get("PET_EV_DEBUG"):
                 import traceback
@@ -1677,17 +2148,20 @@ class Pet:
         self.root.after(16, self._poll_x_events)
 
     def on_press(self, event):
+        if getattr(event, "num", 1) != 1:
+            return   # 只有左键触发
         if os.environ.get("PET_EV_DEBUG"):
             print("EV: on_press xr=%d yr=%d" % (event.x_root, event.y_root),
                   file=sys.stderr)
-        if self.priority_until_idle:
-            return   # 馋/吃蛋糕播放中，不响应点击
+        if self.priority_until_idle and self.mode != "eat":
+            return   # 馋播放中不响应；吃蛋糕允许被拎走
+        # 记录拖拽前的特殊状态：睡觉 / 想回家弹窗 / 吃蛋糕
+        self._drag_from_special = bool(
+            self.mode == "sleep" or self._asleep
+            or self._home_dialog_open() or self._desktop_dialog_open()
+            or self.mode == "eat" or self.eat_flow)
+        self._dragged = False
         self.wake()
-        if getattr(self, "cake", None) and self.cake.active:
-            self.cake.feed()   # 点击小狗喂食
-            self._press_time = int(self.root.tk.call("clock", "milliseconds"))
-            self._press_pos = (event.x_root, event.y_root)
-            return
         self.drag_off = (event.x_root - self.x, event.y_root - self.y)
         self._press_time = int(self.root.tk.call("clock", "milliseconds"))
         self._press_pos = (event.x_root, event.y_root)
@@ -1698,6 +2172,9 @@ class Pet:
             self.test_log.flush()
 
     def on_drag(self, event):
+        # 注意：MotionNotify 事件的 num 不是按键号（是移动提示），
+        # 拖拽合法性由 self.drag_off（左键按下才置位）把关
+        self._dragged = True
         if os.environ.get("PET_EV_DEBUG"):
             print("EV: on_drag xr=%d x=%d" % (event.x_root, self.x),
                   file=sys.stderr)
@@ -1713,7 +2190,9 @@ class Pet:
             self.root.geometry("+%d+%d" % (self.x, self.y))
 
     def on_release(self, event):
-        if self.priority_until_idle:
+        if getattr(event, "num", 1) != 1:
+            return   # 只有左键触发
+        if self.priority_until_idle and self.mode != "eat":
             return
         self.drag_off = None
         self.set_mode("idle")
@@ -1727,19 +2206,33 @@ class Pet:
             if self.anim.get("happy"):
                 self.set_mode("happy")
         self._press_time = None
+        if (self._drag_from_special and self._dragged
+                and self.anim.get("kuku")):
+            # 从 睡觉/想回家/吃蛋糕 状态被拖走再放下 -> 委屈地哭一次
+            self.play_sticker("kuku")
+        self._drag_from_special = False
+        self._dragged = False
         if self.test_log:
             self.test_log.write("release %d %d\n" % (event.x_root, event.y_root))
             self.test_log.flush()
 
     def on_double(self, event):
+        if getattr(event, "num", 1) != 1:
+            return   # 只有左键触发
         if self.priority_until_idle:
             return
         self.wake()
-        if self.anim.get("jump"):
+        if self._is_walk_display(self.current_frame()) and not self.jumping:
+            # 散步中双击：物理跳跃并保持水平速度，不停下来
+            self._start_jump()
+            self.show_heart()
+        elif self.anim.get("jump"):
             self.set_mode("jump")
             self.show_heart()
 
     def popup_menu(self, event):
+        if self._menu_open:
+            return   # 菜单已开着，不再重复弹出
         menu = tk.Menu(self.root, tearoff=0,
                        font=MENU_FONT,
                        bg=MENU_BG, fg=MENU_FG,
@@ -1784,6 +2277,8 @@ class Pet:
             menu.add_command(label=_group_cfg(self.cfg, "sleep")["name"],
                              command=free(self.sleep))
         menu.add_command(label="醒来", command=self.wake)
+        if self.home:
+            menu.add_command(label="想回家", command=free(lambda: self._open_dialog("home")))
         if getattr(self, "cake", None):
             menu.add_command(label="拿取蛋糕",
                              command=free(self.cake.spawn_near_me))
@@ -1812,6 +2307,8 @@ def main(auto_close_ms=None, test_mode=False, start_pos=None):
     if not test_mode:
         import cake
         cake.install(root, pet)
+        import home
+        home.install(root, pet)
     if auto_close_ms:
         root.after(auto_close_ms, root.destroy)
     try:

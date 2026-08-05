@@ -2,7 +2,7 @@
 """一键重建全部桌宠动画：抠图 + 尺寸统一。
 
 素材位置：
-  stickers_src/*.gif   -> 待机动图（like/chan/aini）
+  stickers_src/*.gif   -> 待机动图（walk/chan/aini）
   stickers_src/*.png   -> 静态动作（walk/drag/wave/jump/sit）
   source_videos/*.mp4  -> 视频抠图（happy/sleep）
 
@@ -25,10 +25,12 @@ def prune_deleted():
     known = set(cfg["groups"].keys())
     removed = 0
     for g in pet.IDLE_ORDER + ["happy", "sleep", "walk", "drag", "wave",
-                               "jump", "sit", "sleepb", "eat", "kunkun"]:
+                               "jump", "sit", "sleepb", "eat", "kunkun",
+                               "home", "kuku"]:
         if g in known:
             continue
-        for f in glob.glob(os.path.join(pet.SPR, g + "_*.png")) + \
+        for f in glob.glob(os.path.join(pet.SPR, g, "*.png")) + \
+                 glob.glob(os.path.join(pet.SPR, g + "_*.png")) + \
                  glob.glob(os.path.join(pet.SPR, g + ".png")):
             try:
                 os.remove(f)
@@ -43,10 +45,15 @@ def ensure_eat_placeholder():
     """「吃蛋糕」素材还没提供，先用占位帧（小白旁边放一块小蛋糕）。"""
     from PIL import Image
     import cake
-    path = os.path.join(pet.SPR, "eat_00.png")
-    if os.path.exists(path):
+    def find(name):
+        m = glob.glob(os.path.join(pet.SPR, "**", name), recursive=True)
+        return m[0] if m else None
+    path = find("eat_00.png")
+    if path:
         return
-    base = Image.open(os.path.join(pet.SPR, "like_00.png")).convert("RGBA")
+    path = os.path.join(pet.SPR, "eat", "eat_00.png")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    base = Image.open(find("walk_00.png")).convert("RGBA")
     cake_img = cake.draw_cake(96)
     base.alpha_composite(cake_img, (base.width - 110, base.height - 120))
     base.save(path)

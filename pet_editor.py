@@ -22,12 +22,15 @@ import pet
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPR = os.path.join(HERE, "sprites")
 
-ORDER = ["like", "chan", "aini", "happy", "sleep", "walk", "drag",
-         "wave", "jump", "sit", "eat", "kunkun"]
+ORDER = ["chan", "aini", "happy", "sleep", "walk", "drag",
+         "wave", "jump", "sit", "eat", "kunkun", "home",
+         "kuku"]
 
 
 def group_files(g):
-    files = sorted(glob.glob(os.path.join(SPR, g + "_*.png")))
+    files = sorted(glob.glob(os.path.join(SPR, g, "*.png")))
+    if not files:   # 兼容旧的平铺存放
+        files = sorted(glob.glob(os.path.join(SPR, g + "_*.png")))
     if not files:
         single = os.path.join(SPR, g + ".png")
         if os.path.exists(single):

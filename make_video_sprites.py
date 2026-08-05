@@ -6,12 +6,13 @@ Sleep  (睡觉):   3aa682b7...mp4  (32fps, light bg)
 Kunkun (困困):   a14414ed...mp4  (18fps, white bg)
 
 Pipeline per video: read frames -> AI matting (rembg) -> union content crop ->
-resize onto the 190x180 pet canvas -> save sprites/<prefix>_NN.png.
+resize onto the 190x180 pet canvas -> save sprites/<prefix>/<prefix>_NN.png.
 """
 
 import os
 
 import cv2
+import numpy as np
 from PIL import Image
 from PIL import ImageFilter
 from rembg import new_session, remove
@@ -38,12 +39,38 @@ def load_frames(path, step=1):
     return frames
 
 
+def crop_frames(frames, box):
+    """Crop every frame to (x0, y0, x1, y1) before matting."""
+    if not box:
+        return frames
+    x0, y0, x1, y1 = box
+    return [fr[y0:y1, x0:x1] for fr in frames]
+
+
 def matte(frames, session):
     out = []
     for fr in frames:
         im = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
         out.append(remove(im, session=session))
     return out
+
+
+def keep_blue_frames(matted, frames):
+    """保留所有蓝色像素：把源帧中 B 明显大于 R/G 的像素强制为不透明，
+    并把 RGB 还原成源帧原色（rembg 有时会把蓝色洗浅/当背景）。
+    kuku 的蓝色眼泪/水坑每帧都必须保留。"""
+    outs = []
+    for m, fr in zip(matted, frames):
+        arr = np.array(m)
+        rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB).astype(int)
+        blueness = rgb[..., 2] - np.maximum(rgb[..., 0], rgb[..., 1])
+        blue = blueness > 20
+        arr[..., 3][blue] = 255
+        arr[..., 0][blue] = rgb[..., 0][blue]
+        arr[..., 1][blue] = rgb[..., 1][blue]
+        arr[..., 2][blue] = rgb[..., 2][blue]
+        outs.append(Image.fromarray(arr))
+    return outs
 
 
 def key_white_border(frames):
@@ -126,11 +153,19 @@ def union_bbox(images):
 
 def clear_prefix(prefix):
     import glob
-    for f in glob.glob(os.path.join(OUT, prefix + "_*.png")):
+    for f in glob.glob(os.path.join(OUT, prefix, "*.png")) + \
+             glob.glob(os.path.join(OUT, prefix + "_*.png")):
         try:
             os.remove(f)
         except OSError:
             pass
+
+
+def group_dir(prefix):
+    """每个动作一个文件夹：sprites/<prefix>/"""
+    d = os.path.join(OUT, prefix)
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def make_sleep_breathing(base_file, prefix="sleepb", n_frames=16, amplitude=0.011,
@@ -140,7 +175,9 @@ def make_sleep_breathing(base_file, prefix="sleepb", n_frames=16, amplitude=0.01
     import math
     scales = tuple(round(1 + amplitude * math.sin(2 * math.pi * i / n_frames), 4)
                    for i in range(n_frames))
-    base = Image.open(os.path.join(OUT, base_file)).convert("RGBA")
+    import glob
+    base_path = glob.glob(os.path.join(OUT, "**", base_file), recursive=True)
+    base = Image.open(base_path[0]).convert("RGBA")
     clear_prefix(prefix)
     for i, s in enumerate(scales):
         nw = max(1, int(round(base.width * s)))
@@ -148,7 +185,7 @@ def make_sleep_breathing(base_file, prefix="sleepb", n_frames=16, amplitude=0.01
         scaled = base.resize((nw, nh), Image.LANCZOS)
         canvas = Image.new("RGBA", (base.width, base.height), (0, 0, 0, 0))
         canvas.alpha_composite(scaled, ((base.width - nw) // 2, base.height - nh))
-        canvas.save(os.path.join(OUT, "%s_%02d.png" % (prefix, i)))
+        canvas.save(os.path.join(group_dir(prefix), "%s_%02d.png" % (prefix, i)))
     print("  breathing frames saved (%dms)" % ms)
 
 
@@ -167,31 +204,39 @@ def save_frames(images, prefix, ms, canvas=(W, H), bottom=172, sharpen=False):
             im = im.filter(ImageFilter.UnsharpMask(radius=2, percent=80, threshold=2))
         out = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
         out.alpha_composite(im, ((cw - nw) // 2, bottom - nh))
-        out.save(os.path.join(OUT, "%s_%02d.png" % (prefix, i)))
+        out.save(os.path.join(group_dir(prefix), "%s_%02d.png" % (prefix, i)))
     print("  saved with %dms/frame" % ms)
 
 
 def main():
-    print("loading rembg session...")
-    session = new_session("u2net")
-
     import sys
     only = sys.argv[1:] if len(sys.argv) > 1 else None
-    # (name, frame step, ms/frame, sharpen, use_key_white_border)
-    jobs = [("happy", 2, 33, False, False),
-            ("sleep", 1, 31, True, False),
-            ("eat", 2, 33, True, True),
-            ("kunkun", 1, 56, True, False)]
-    for name, step, ms, sharpen, use_key in jobs:
+    # (name, step, ms, sharpen, use_key, crop box, keep_blue)
+    # wave/home: 微信视频消息里的白色贴纸框，线条小狗在纯白面板中间
+    # 挥手/跑动。线条有开口，flood-fill 会把内部漏掉，改用 rembg AI 抠图。
+    jobs = [("happy", 2, 33, False, False, None, False),
+            ("sleep", 1, 31, True, False, None, False),
+            ("eat", 2, 33, True, True, None, False),
+            ("kunkun", 1, 56, True, False, None, False),
+            ("wave", 1, 50, True, False, (60, 420, 534, 860), False),
+            ("home", 1, 50, True, False, (100, 420, 540, 870), False),
+            ("kuku", 1, 66, True, False, (0, 352, 594, 870), True)]
+    session = None
+    for name, step, ms, sharpen, use_key, crop, keep_blue in jobs:
         if only and name not in only:
             continue
         src = os.path.join(VID, name + ".mp4")
         if not os.path.exists(src):
             print("skip %s (missing %s)" % (name, src))
             continue
+        if not use_key and session is None:
+            print("loading rembg session...")
+            session = new_session("u2net")
         print("processing %s..." % name)
-        frames = load_frames(src, step=step)
+        frames = crop_frames(load_frames(src, step=step), crop)
         processed = key_white_border(frames) if use_key else matte(frames, session)
+        if keep_blue:
+            processed = keep_blue_frames(processed, frames)
         save_frames(processed, name, ms,
                     canvas=(380, 360), bottom=352, sharpen=sharpen)
 

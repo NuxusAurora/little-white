@@ -3,7 +3,7 @@
 uniform desktop-pet animation frames.
 
 Sticker sources (personal use):
-  17弹: like.gif (喜欢), chan.gif (馋), aini.gif (爱你)
+  17弹: like.gif (散步), chan.gif (馋), aini.gif (爱你)
   30弹: happy.gif (开心)
 
 Output: sprites/<name>_NN.png, 190x180 transparent frames.
@@ -43,7 +43,7 @@ def union_bbox(gif):
     return x0, y0, x1 + 1, y1 + 1
 
 
-def extract(gif_name, prefix, fps_note=""):
+def extract(gif_name, prefix, fps_note="", flip=False):
     path = os.path.join(SRC, gif_name)
     gif = Image.open(path)
     nf = getattr(gif, "n_frames", 1)
@@ -61,14 +61,18 @@ def extract(gif_name, prefix, fps_note=""):
         px = (W - nw) // 2
         py = 172 - nh  # bottom aligned
         canvas.alpha_composite(fr, (px, py))
+        if flip:
+            canvas = canvas.transpose(Image.FLIP_LEFT_RIGHT)   # 散步帧水平翻转
         name = "%s_%02d.png" % (prefix, i)
-        canvas.save(os.path.join(OUT, name))
+        d = os.path.join(OUT, prefix)   # 每个动作一个文件夹
+        os.makedirs(d, exist_ok=True)
+        canvas.save(os.path.join(d, name))
         frames.append((name, i))
     return frames
 
 
 def main():
-    extract("like.gif", "like")
+    extract("like.gif", "walk", flip=True)   # like.gif 的帧用作「散步」动作
     extract("chan.gif", "chan")
     extract("aini.gif", "aini")
     print("done ->", OUT)

@@ -1,6 +1,6 @@
 {
   "groups": {
-    "like": {
+    "walk": {
       "name": "散步",
       "enabled": true,
       "scale": 1.2,
@@ -24,12 +24,6 @@
       "scale": 1.21,
       "category": "normal"
     },
-    "walk": {
-      "name": "跳舞",
-      "enabled": true,
-      "scale": 1.0,
-      "category": "special"
-    },
     "drag": {
       "name": "被拎",
       "enabled": true,
@@ -46,6 +40,24 @@
       "name": "困困",
       "enabled": true,
       "scale": 0.9,
+      "category": "special"
+    },
+    "wave": {
+      "name": "挥手",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "normal"
+    },
+    "home": {
+      "name": "回家",
+      "enabled": true,
+      "scale": 1.0,
+      "category": "special"
+    },
+    "kuku": {
+      "name": "哭哭",
+      "enabled": true,
+      "scale": 1.0,
       "category": "special"
     }
   }

@@ -12,7 +12,7 @@ import tkinter as tk
 import pet
 
 REQUEST_FILE = os.path.join(pet.HERE, "_cake_request.json")
-FEED_ZONE = 200
+TOUCH_ZONE = 90          # 小白中心离蛋糕中心多近算「碰到」
 
 
 def draw_cake(size=64):
@@ -47,7 +47,6 @@ class Cake:
         self.pet = puppy
         self.active = False
         self.cake_x = self.cake_y = 0
-        self.was_near = False
         puppy.cake = self
 
         self.win = tk.Toplevel(root)
@@ -62,8 +61,6 @@ class Cake:
         key_ok = pet._apply_linux_keycolor(self.win)
         self.surface = pet._KeyedSurface(
             self.win, self.label, cw, ch, key_ok=key_ok)
-        # 直接点蛋糕本身也能喂食
-        self.win.bind("<Button-1>", lambda e: self.feed())
 
         self._poll_requests()
 
@@ -82,10 +79,8 @@ class Cake:
         except Exception:
             pass
         if self.active:
-            near = self.near_pet()
-            if near and not self.was_near:
-                self.pet.play_sticker("chan")   # 蛋糕靠近 -> 馋
-            self.was_near = near
+            if self.touching_pet():
+                self.feed()   # 小白碰到蛋糕就自动开吃，不需要点击
         self.root.after(30, self._poll_requests)
 
     def cake_center(self):
@@ -95,33 +90,41 @@ class Cake:
         w, h = self.pet.window_size()
         return self.pet.x + w // 2, self.pet.y + h // 2
 
-    def near_pet(self):
+    def touching_pet(self):
         cx, cy = self.cake_center()
         px, py = self.pet_center()
-        return ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5 < FEED_ZONE
+        return ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5 < TOUCH_ZONE
 
     # -------------------------------------------------------------- cake
     def spawn_at(self, x, y):
         """在指定位置生成蛋糕（指针居中）。"""
-        self.cake_x, self.cake_y = x - 32, y - 32
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        self.cake_x = max(32, min(sw - 32, x - 32))
+        self.cake_y = max(32, min(sh - 32, y - 32))
         self.active = True
         self.win.geometry("+%d+%d" % (self.cake_x, self.cake_y))
         self.win.deiconify()
         self.win.lift()
         self.surface.update(self.cake_img, self.cake_x, self.cake_y)
+        self.pet.go_to_cake()   # 生成后小白跳过去
 
     def spawn_near_me(self):
-        """右键小白菜单触发：在小白的右侧生成一块蛋糕。"""
+        """右键小白菜单触发：生成在小白面朝方向的前上方。"""
         w, h = self.pet.window_size()
-        self.spawn_at(self.pet.x + w + 10, self.pet.y + h // 2)
+        if self.pet.vx >= 0:     # 面朝右
+            x = self.pet.x + w // 2 + 65
+        else:                    # 面朝左
+            x = self.pet.x - 65
+        y = self.pet.y - 80      # 略高于小白头顶
+        self.spawn_at(x, y)
 
     def hide(self):
         self.active = False
-        self.was_near = False
         self.win.withdraw()
 
     def feed(self):
-        """点击小白喂食：蛋糕消失，小白吃蛋糕 -> 爱你。"""
+        """碰到蛋糕：蛋糕消失，小白吃蛋糕（两遍）-> 爱你。"""
         if not self.active:
             return
         self.hide()

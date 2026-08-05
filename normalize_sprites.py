@@ -21,12 +21,15 @@ CANVAS_W, CANVAS_H = 380, 360      # display-native canvas
 TARGET_W, TARGET_H = 320, 300       # uniform subject box
 BOTTOM = 352                        # where feet / base rest
 
-GROUPS = ["like", "chan", "aini", "happy", "sleep",
-          "walk", "drag", "wave", "jump", "sit", "eat", "kunkun"]
+GROUPS = ["chan", "aini", "happy", "sleep",
+          "walk", "drag", "wave", "jump", "sit", "eat", "kunkun", "home",
+          "kuku"]
 
 
 def group_files(g):
-    files = sorted(glob.glob(os.path.join(SPR, g + "_*.png")))
+    files = sorted(glob.glob(os.path.join(SPR, g, "*.png")))
+    if not files:   # 兼容旧的平铺存放
+        files = sorted(glob.glob(os.path.join(SPR, g + "_*.png")))
     if not files:
         single = os.path.join(SPR, g + ".png")
         if os.path.exists(single):
@@ -115,7 +118,11 @@ def clean_specks(g, min_area=40, alpha_min=30, keep_largest_only=False):
 
 
 def main():
+    import sys
+    only = set(sys.argv[1:])
     for g in GROUPS:
+        if only and g not in only:
+            continue
         if g == "kunkun":
             # 先把漂浮的黄色气泡清掉，再按小狗主体统一尺寸
             clean_specks(g, keep_largest_only=True)
