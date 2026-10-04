@@ -10,6 +10,7 @@ import ctypes
 import glob
 import json
 import sys
+import threading
 import time
 
 import tkinter as tk
@@ -18,12 +19,38 @@ from PIL import Image, ImageTk
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPR = os.path.join(HERE, "sprites")
 
+_DBG_F = None
+
+
+def _dbg(msg):
+    """调试日志（写到 _pet_dbg.log，正式交付前会移除）。"""
+    global _DBG_F
+    if _DBG_F is None:
+        try:
+            _DBG_F = open(os.path.join(HERE, "_pet_dbg.log"), "a",
+                          encoding="utf-8")
+        except Exception:
+            return
+    try:
+        _DBG_F.write(msg + "\n")
+        _DBG_F.flush()
+    except Exception:
+        pass
+
 MAGENTA = "#ff00fe"          # transparent key color (Windows)
 KEY_RGB = (255, 0, 254)      # same key as an RGB tuple (Linux -transparentcolor)
 LINUX_FILL = (0, 0, 0)       # Linux 上透明区填充色（形状切掉后不可见；
                              # 瞬时错位时只露出深色剪影而不是品红）
 BASE_W, BASE_H = 190, 180    # sprite canvas size
 GRAVITY = 1000.0             # px / s^2, v = g*t
+
+# 桌面图标踢飞物理：先加速（推力）再减速（摩擦），撞屏幕边缘反弹，停后小白捡回原位
+ICON_KICK_ACCEL = 400.0      # 踢出加速度 px/s^2（按用户要求）
+ICON_KICK_THRUST = 2.5       # 推力持续时间 s（长推力，图标一路加速横穿屏幕）
+ICON_DRAG = 0.9              # 摩擦系数 /s（推力结束后指数减速）
+ICON_RESTITUTION = 0.35      # 撞边反弹保留速度比例（低一点，停在对侧）
+ICON_STOP_SPEED = 12.0       # 速度低于该值就停下（px/s）
+ICON_SIZE = 48               # 图标近似尺寸（px），用于碰撞边界
 
 IS_WIN = sys.platform.startswith("win")
 IS_LINUX = sys.platform.startswith("linux")
@@ -1056,6 +1083,8 @@ class Pet:
         self._home_target_y = None    # 回家目标 y（地面高度）
 
         w, h = self.window_size()
+        self._screen_w = root.winfo_screenwidth()
+        self._screen_h = root.winfo_screenheight()
         if start_pos is not None:
             x, y = start_pos
         else:
@@ -1065,6 +1094,32 @@ class Pet:
         self.clamp()
         self._stuck_pos = (self.x, self.y)
         root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+
+        self._kick_target = None
+        self._kick_target_cx = 0
+        self._kick_target_cy = 0
+        self._kick_pick_t = time.monotonic() + random.uniform(2, 6)
+        self._kick_steps = 0
+        self._kick_start_t = 0.0
+        self._nav_target = None          # 桌面自由移动的目标点（屏幕坐标）
+        self._last_nav = 0.0
+        self._icon_fly = None          # 正在飞的图标（物理状态）
+        self._icon_fly_last = 0.0
+        self._icon_return = None       # 停下来的图标，等小白去捡
+        self._icon_return_t = 0.0
+        self._icon_carry = None        # 小白正搬回原位的图标
+        self._icon_homes = {}          # 图标索引 -> 第一次被踢时的位置（还回这里）
+        self._icon_phys_active = False
+        self._icon_phys_thread = None  # 飞行动画线程
+        self._icon_phys_stop = threading.Event()
+        self._snap_was_on = False      # 开踢前“对齐到网格”是否开着（结束后恢复）
+        self._home_prep = False        # 回家前整理图标流程进行中
+        self._tidy_queue = []          # 待放回原位的图标队列
+        self._kick_enabled = False     # 默认关闭；右键菜单可手动开启
+        try:
+            self._kick_mode_var = tk.BooleanVar(root, value=False)
+        except Exception:
+            self._kick_mode_var = None
 
         root.overrideredirect(True)
         root.attributes("-topmost", True)
@@ -1098,6 +1153,7 @@ class Pet:
             self._start_walk_burst()
             self._ensure_fall_loop()
             self.root.after(500, self._check_want_home)
+            self.root.after(80, self._kick_desktop_icons)
             if not test_mode:
                 self.schedule_action(2200)
             return
@@ -1229,6 +1285,57 @@ class Pet:
             except tk.TclError:
                 pass
         self.root.after(3000, self.keep_topmost)
+
+    def _kick_desktop_icons(self):
+        """Windows：小白在桌面时踢图标玩；回家前先把所有图标整理回原位。"""
+        if self.test_mode:
+            return
+        if IS_WIN:
+            try:
+                self._ensure_icon_homes()
+                if ((self._icon_return is not None
+                        or self._icon_carry is not None)
+                        and not self.going_home and not self._home_prep):
+                    # 有图标要捡/搬：最高优先级，先把这单送完
+                    self._kick_target = None
+                    self._nav_target = None
+                    self.wake()
+                    self.sleep_prep = False
+                    if self.mode != "walk":
+                        self.start_walk()
+                    self._steer_icon_return(time.monotonic())
+                elif self._home_prep:
+                    self._tidy_icons_then_home()
+                elif (not self.at_home and self.root.winfo_ismapped()
+                        and not self.going_home and not self._going_cake
+                        and not self._asleep and not self.sleep_prep
+                        and not self.falling):
+                    if self._kick_enabled:
+                        import desktop_icons
+                        if (self._icon_fly is None
+                                and self._icon_return is None
+                                and self._icon_carry is None
+                                and self._kick_target is None):
+                            w, h = self.window_size()
+                            pcx = self.x + w // 2
+                            pcy = self.y + h // 2
+                            icons = desktop_icons.icon_screen_positions()
+                            for index, (sx, sy) in icons.items():
+                                dx = sx + 32 - pcx
+                                dy = sy + 32 - pcy
+                                if dx * dx + dy * dy <= 120 * 120:
+                                    if self._kick_icon_physics(index, pcx, pcy):
+                                        break
+                        if (self._nav_target is not None
+                                or self._kick_target is not None):
+                            if self.mode == "idle":
+                                self.start_walk()
+                        elif self.mode != "sleep" and not self.sleep_prep:
+                            # 没在忙别的：待机时也主动挑图标去踢
+                            self._steer_to_kick_target(time.monotonic())
+            except Exception:
+                pass
+            self.root.after(250, self._kick_desktop_icons)
 
     def current_frame(self):
         if self.mode == "sticker":
@@ -1388,8 +1495,442 @@ class Pet:
         # 散步中永不停歇：不进入「休息」状态，持续按地形移动
         if self.walk_state != "walk":
             self._start_walk_burst()
-        self._step_with_terrain()
+        self._steer_to_kick_target(now)
+        if IS_WIN and (self._kick_enabled or self._nav_target is not None):
+            self._nav_walk(now)
+        else:
+            self._step_with_terrain()
         self._ensure_fall_loop()
+
+    def _nav_walk(self, now):
+        """桌面自由移动：有目标就直线走过去（无视地形），否则按 vx 水平走。"""
+        if self.jumping:
+            return
+        t = self._nav_target
+        if t is None:
+            self.move(self.vx, 0)
+            return
+        dt = min(now - self._last_nav, 0.1) if self._last_nav else 0.0
+        self._last_nav = now
+        tx, ty = t
+        w, h = self.window_size()
+        pcx = self.x + w // 2
+        pcy = self.y + h // 2
+        dx = tx - pcx
+        dy = ty - pcy
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist < 10:
+            self._nav_target = None
+            return
+        speed = (100.0 if self._icon_carry is not None else 160.0) \
+            * self.scale                # 搬着图标时走慢点，跟得稳
+        step = min(speed * dt, dist)
+        self.vx = 4 if dx >= 0 else -4  # 决定走路贴纸朝向
+        self.move(int(dx / dist * step), int(dy / dist * step))
+
+    def _steer_to_kick_target(self, now):
+        """散步时主动去找桌面图标踢：转向目标，够近就把图标踢开一格并蹦一下。"""
+        if not IS_WIN or self.test_mode:
+            return
+        if not self._kick_enabled:
+            self._kick_target = None
+            self._nav_target = None
+            if self._icon_return is not None or self._icon_carry is not None:
+                self._steer_icon_return(now)
+            return
+        if self._home_prep:
+            # 回家前整理图标：不挑新目标，把手头没送完的送完
+            self._kick_target = None
+            self._nav_target = None
+            if self._icon_return is not None or self._icon_carry is not None:
+                self._steer_icon_return(now)
+            return
+        if self._icon_return is not None or self._icon_carry is not None:
+            # 有图标等着捡/搬：先干正事，不挑新目标（最高优先级）
+            self._kick_target = None
+            self._nav_target = None
+            self._steer_icon_return(now)
+            return
+        if (self.sleep_prep or self.drag_off or self.going_home
+                or self._going_cake or self._asleep):
+            self._kick_target = None
+            self._nav_target = None
+            return
+        try:
+            import desktop_icons
+        except Exception:
+            self._kick_target = None
+            self._nav_target = None
+            return
+        if self._icon_fly is not None:
+            self._kick_target = None
+            self._nav_target = None
+            return
+        w, h = self.window_size()
+        pcx = self.x + w // 2
+        pcy = self.y + h // 2
+        target = self._kick_target
+        if target is None:
+            if now < self._kick_pick_t:
+                return
+            self._kick_pick_t = now + random.uniform(2, 5)
+            try:
+                icons = desktop_icons.icon_screen_positions()
+            except Exception:
+                icons = {}
+            if not icons:
+                return
+            cands = []
+            for idx, (sx, sy) in icons.items():
+                icx, icy = sx + 32, sy + 32
+                dx, dy = icx - pcx, icy - pcy
+                d2 = dx * dx + dy * dy
+                if 100 * 100 <= d2 <= 1300 * 1300:
+                    cands.append((d2, idx, icx, icy))
+            if not cands:
+                return
+            cands.sort()
+            self._kick_target = cands[0][1]
+            self._kick_target_cx = cands[0][2]
+            self._kick_target_cy = cands[0][3]
+            self._kick_steps = 0
+            self._kick_start_t = now
+            self._nav_target = (self._kick_target_cx, self._kick_target_cy)
+            return
+        dx = self._kick_target_cx - pcx
+        dy = self._kick_target_cy - pcy
+        if dx * dx + dy * dy >= 110 * 110:
+            if now - self._kick_start_t > 25.0:
+                self._kick_target = None
+                self._nav_target = None
+                self._kick_pick_t = now + 1.0
+            return
+        # 够近了：踢飞它（物理效果）！
+        self._kick_target = None
+        self._nav_target = None
+        self._kick_pick_t = now + random.uniform(2, 5)
+        if self._kick_icon_physics(target, pcx, pcy):
+            self._start_jump()
+
+    def _kick_icon_physics(self, index, pet_cx, pet_cy):
+        """把第 index 个桌面图标踢飞（离散跳跃动画）。
+
+        explorer 不会逐帧重绘桌面图标的程序化移动（移动太密只画终点，
+        看起来是瞬移）。所以踢飞做成"加速-减速"共 8 跳、每跳间隔约 250ms，
+        每一跳都能被画出来：图标蹦跳着横穿屏幕、撞对侧边缘反弹、停下。
+        """
+        if not self._kick_enabled:
+            return False
+        if (self._icon_fly is not None or self._icon_return is not None
+                or self._icon_carry is not None):
+            return False
+        try:
+            import desktop_icons
+        except Exception:
+            return False
+        try:
+            icons = desktop_icons.icon_screen_positions(ttl=0)
+            pos = icons.get(index)
+            if pos is None:
+                _dbg("kick_fail: no pos")
+                return False
+            sx, sy = pos
+            self._icon_homes.setdefault(index, (sx, sy))
+            flags = desktop_icons.get_folder_flags()
+            if flags is None:
+                _dbg("kick_fail: no flags")
+                return False
+            self._snap_was_on = bool(flags & desktop_icons.FWF_SNAPTOGRID)
+            if self._snap_was_on:
+                if not desktop_icons.set_snap_grid(False):
+                    self._snap_was_on = False
+                    return False
+            if flags & desktop_icons.FWF_AUTOARRANGE:
+                self._maybe_restore_snap()
+                return False
+            dx = sx + ICON_SIZE // 2 - pet_cx
+            dy = sy + ICON_SIZE // 2 - pet_cy
+            if abs(dx) < 30:
+                dx = 1 if random.random() < 0.5 else -1
+            # 水平踢向屏幕另一边（图标横穿屏幕，撞边反弹）
+            dirx = 1.0 if dx >= 0 else -1.0
+            try:
+                wa = desktop_icons.work_area()
+            except Exception:
+                wa = None
+            if wa:
+                l, r = wa[0], wa[2]
+            else:
+                l, r = 0, self._screen_w
+            max_x = r - ICON_SIZE
+            dist = (max_x - sx) if dirx > 0 else (sx - l)
+            dist = max(60, dist * 0.9)
+            profile = [1, 2, 3, 4, 4, 3, 2, 1]   # 先加速后减速
+            psum = float(sum(profile))
+            pos = float(sx)
+            d = dirx
+            targets = []
+            for k in profile:
+                pos += d * (dist * k / psum)
+                if pos < l:
+                    pos = 2 * l - pos
+                    d = 1
+                elif pos > max_x:
+                    pos = 2 * max_x - pos
+                    d = -1
+                targets.append(max(l, min(max_x, pos)))
+            self._icon_fly = {
+                "index": index,
+                "x": float(sx),
+                "y": float(sy),
+                "targets": targets,
+                "i": -1,
+                "home": self._icon_homes[index],
+            }
+            self._ensure_icon_physics()
+            _dbg("fly_start idx=%d from=(%d,%d) dir=%s hops=%d" % (
+                index, sx, sy, "R" if dirx > 0 else "L", len(targets)))
+            return True
+        except Exception as e:
+            _dbg("kick_fail: exc %r" % (e,))
+            self._icon_fly = None
+            self._maybe_restore_snap()
+            return False
+
+    def _ensure_icon_physics(self):
+        """启动独立线程跑飞行动画：主线程动画卡顿时图标也能逐帧移动。"""
+        t = self._icon_phys_thread
+        if t is None or not t.is_alive():
+            self._icon_phys_thread = threading.Thread(
+                target=self._icon_phys_worker, name="icon-phys", daemon=True)
+            self._icon_phys_thread.start()
+
+    def _icon_phys_worker(self):
+        """图标动画线程：按 250ms 一跳执行踢飞跳跃/搬运跟随。
+
+        explorer 不会逐帧重绘桌面图标的程序化移动（间隔太密只画终点，
+        看起来是瞬移），所以每跳之间留足时间让系统重绘。"""
+        try:
+            ctypes.windll.ole32.CoInitializeEx(None, 0x2)
+        except Exception:
+            pass
+        try:
+            import desktop_icons
+        except Exception:
+            return
+        while not self._icon_phys_stop.wait(0.25):
+            fly = self._icon_fly
+            if fly is not None:
+                try:
+                    i = fly["i"] + 1
+                    fly["i"] = i
+                    if i < len(fly["targets"]):
+                        fly["x"] = fly["targets"][i]
+                        desktop_icons.move_icon(
+                            fly["index"], int(fly["x"]), int(fly["y"]))
+                    else:
+                        # 跳完：停下等小白捡
+                        self._icon_return = {
+                            "index": fly["index"],
+                            "x": fly["x"],
+                            "y": fly["y"],
+                            "home": fly["home"],
+                        }
+                        self._icon_return_t = time.monotonic()
+                        self._icon_fly = None
+                        _dbg("fly_end idx=%d at=(%d,%d)" % (
+                            fly["index"], int(fly["x"]), int(fly["y"])))
+                except Exception:
+                    # 单帧出错不能停：放弃飞行，让小白去捡
+                    if self._icon_fly is not None:
+                        f = self._icon_fly
+                        self._icon_return = {
+                            "index": f["index"], "x": f["x"], "y": f["y"],
+                            "home": f["home"]}
+                        self._icon_return_t = time.monotonic()
+                        self._icon_fly = None
+                continue
+            carry = self._icon_carry
+            if carry is not None:
+                # 图标平滑跟随小白（捧在身前，随朝向左右）
+                try:
+                    w, h = self.window_size()
+                    facing = self.last_facing or 1
+                    fx = self.x + w // 2 + 44 * facing - ICON_SIZE // 2
+                    fy = self.y + h // 2 - 26
+                    desktop_icons.move_icon(carry["index"], fx, fy)
+                except Exception:
+                    pass
+
+    def _steer_icon_return(self, now):
+        """捡回停下来的图标，搬回原位放好。"""
+        if self.drag_off or self.going_home or self._going_cake:
+            return
+        try:
+            import desktop_icons
+        except Exception:
+            return
+        w, h = self.window_size()
+        pcx = self.x + w // 2
+        pcy = self.y + h // 2
+        if self._icon_carry is not None:
+            c = self._icon_carry
+            hx, hy = c["home"]
+            if self._nav_target is None:
+                self._nav_target = (hx + ICON_SIZE // 2, hy + ICON_SIZE // 2)
+            dx = hx + ICON_SIZE // 2 - pcx
+            dy = hy + ICON_SIZE // 2 - pcy
+            if now - getattr(self, "_dbg_t", 0.0) >= 1.0:
+                self._dbg_t = now
+                _dbg("carry mode=%s jump=%s me=(%d,%d) home=(%d,%d) d=%.0f" % (
+                    self.mode, self.jumping, pcx, pcy, hx + 24, hy + 24,
+                    (dx * dx + dy * dy) ** 0.5))
+            if dx * dx + dy * dy < 60 * 60:
+                # 到原位了：放回去
+                try:
+                    desktop_icons.move_icon(c["index"], hx, hy)
+                except Exception:
+                    pass
+                self._icon_carry = None
+                self._nav_target = None
+                self._maybe_restore_snap()
+                _dbg("place idx=%d" % c["index"])
+                return
+            # 图标的平滑跟随由物理线程每 50ms 驱动（这里只管导航和放回）
+            return
+        if self._icon_return is not None:
+            r = self._icon_return
+            if self._nav_target is None:
+                self._nav_target = (
+                    r["x"] + ICON_SIZE // 2, r["y"] + ICON_SIZE // 2)
+            dx = r["x"] + ICON_SIZE // 2 - pcx
+            dy = r["y"] + ICON_SIZE // 2 - pcy
+            if now - getattr(self, "_dbg_t", 0.0) >= 1.0:
+                self._dbg_t = now
+                _dbg("ret mode=%s jump=%s me=(%d,%d) ico=(%d,%d) d=%.0f" % (
+                    self.mode, self.jumping, pcx, pcy, r["x"] + 24, r["y"] + 24,
+                    (dx * dx + dy * dy) ** 0.5))
+            if (dx * dx + dy * dy < 130 * 130
+                    or now - self._icon_return_t > 12.0):
+                # 到了：捡起来
+                self._icon_carry = {"index": r["index"], "home": r["home"]}
+                self._icon_return = None
+                self._nav_target = None
+                self._start_jump()
+                _dbg("pickup idx=%d me=(%d,%d) ico=(%d,%d)" % (
+                    r["index"], pcx, pcy, r["x"] + 24, r["y"] + 24))
+                return
+
+    def _maybe_restore_snap(self):
+        """没有图标在飞/待捡/被搬时，恢复“对齐到网格”。"""
+        if (self._icon_fly is None and self._icon_return is None
+                and self._icon_carry is None and self._snap_was_on):
+            try:
+                import desktop_icons
+                if not desktop_icons.set_snap_grid(True):
+                    return
+            except Exception:
+                return
+            self._snap_was_on = False
+
+    def _cleanup_icons(self):
+        """停止图标线程，再恢复尚未归位的图标和网格设置。"""
+        self._icon_phys_stop.set()
+        worker = self._icon_phys_thread
+        if worker is not None:
+            worker.join(timeout=2.0)
+            if worker.is_alive():
+                return
+        if not IS_WIN:
+            return
+        import desktop_icons
+        for attr in ("_icon_fly", "_icon_return", "_icon_carry"):
+            item = getattr(self, attr)
+            if item is not None:
+                try:
+                    if desktop_icons.move_icon(item["index"], *item["home"]):
+                        setattr(self, attr, None)
+                except Exception:
+                    pass
+        self._maybe_restore_snap()
+
+    def _toggle_kick_mode(self):
+        """右键菜单开关：关闭后不再踢新图标；手头正在捡/搬的会送完。"""
+        self._kick_enabled = bool(self._kick_mode_var.get()) \
+            if self._kick_mode_var is not None else self._kick_enabled
+        if not self._kick_enabled:
+            self._kick_target = None
+            self._nav_target = None
+        _dbg("kick mode -> %s" % ("on" if self._kick_enabled else "off"))
+
+    def _ensure_icon_homes(self):
+        """记录所有图标的原始位置（小白启动时的布局），踢完就还回这里。"""
+        if self._icon_homes:
+            return
+        try:
+            import desktop_icons
+            homes = desktop_icons.icon_screen_positions()
+            if homes:
+                self._icon_homes = homes
+        except Exception:
+            pass
+
+    def _build_tidy_queue(self):
+        """找出所有不在原位的图标，按离小白的距离排成整理队列。"""
+        queue = []
+        try:
+            import desktop_icons
+            w, h = self.window_size()
+            pcx = self.x + w // 2
+            pcy = self.y + h // 2
+            now = desktop_icons.icon_screen_positions()
+            for idx, (x, y) in now.items():
+                home = self._icon_homes.get(idx)
+                if home is None:
+                    continue
+                hx, hy = home
+                if abs(hx - x) > 4 or abs(hy - y) > 4:
+                    queue.append({
+                        "index": idx, "x": x, "y": y, "home": (hx, hy),
+                        "dist": (x - pcx) ** 2 + (y - pcy) ** 2})
+            queue.sort(key=lambda it: it["dist"])
+        except Exception:
+            pass
+        self._tidy_queue = queue
+        if queue:
+            _dbg("tidy: %d icons out of place" % len(queue))
+
+    def _tidy_icons_then_home(self):
+        """回家前把踢出去的图标全部放回原位，整理完再回家。"""
+        self._kick_target = None
+        self._nav_target = None
+        if (self._icon_return is not None or self._icon_carry is not None):
+            self._steer_icon_return(time.monotonic())
+            return
+        if self._icon_fly is not None:
+            return   # 等飞行结束（结束后会自己转成待捡）
+        if not self._tidy_queue:
+            self._build_tidy_queue()
+        if self._tidy_queue:
+            item = self._tidy_queue.pop(0)
+            self._icon_return = item
+            self._icon_return_t = time.monotonic()
+            self.wake()
+            self.sleep_prep = False
+            if self.mode != "walk":
+                self.start_walk()
+            _dbg("tidy pick idx=%d -> home=(%d,%d)" % (
+                item["index"], item["home"][0], item["home"][1]))
+            return
+        # 全部整理完：回家
+        self._home_prep = False
+        _dbg("tidy done, going home")
+        try:
+            import home
+            home.show_desktop()
+        except Exception:
+            pass
+        self.go_home()
 
     def _ensure_fall_loop(self):
         if not self._fall_active:
@@ -1422,7 +1963,8 @@ class Pet:
                     now = time.monotonic()
                     if now >= self._next_jump_t:
                         # 周期性跳跃：每 3~10 秒跳一次
-                        self._start_jump()
+                        if self._nav_target is None:
+                            self._start_jump()
                     else:
                         # 卡住检测：散步中坐标 1 秒没变 -> 触发跳跃脱困
                         pos = (self.x, self.y)
@@ -1430,7 +1972,8 @@ class Pet:
                             self._stuck_pos = pos
                             self._stuck_since = now
                         elif now - self._stuck_since >= 1.0:
-                            self._start_jump()
+                            if self._nav_target is None:
+                                self._start_jump()
             self.root.after(16, self._fall_loop)
         except Exception:
             # 单帧出错不能让下落停掉：继续调度
@@ -1629,11 +2172,10 @@ class Pet:
             pass
         if kind == "home":
             if go:
+                self._home_ask_t = float("inf")
                 if self._desktop_showing():
-                    # 已经在桌面：直接回家
-                    import home
-                    home.show_desktop()
-                    self.go_home()
+                    # 已经在桌面：先整理图标，再回家
+                    self._home_prep = True
                 else:
                     # 不在桌面：再问一次「先回桌面」
                     self._open_dialog("desktop")
@@ -1641,9 +2183,8 @@ class Pet:
                 self._start_sad_flow()     # 两次回答里有一次「否」
         else:
             if go:
-                import home
-                home.show_desktop()       # 回到桌面后直线回家
-                self.go_home()
+                self._home_ask_t = float("inf")
+                self._home_prep = True    # 回到桌面后先整理图标再回家
             else:
                 self._start_sad_flow()     # 两次回答里有一次「否」
 
@@ -1897,6 +2438,7 @@ class Pet:
     def restart_pet(self):
         """重启小白：先释放 InputOnly 事件窗口和单实例锁（否则新进程的
         事件窗口会被旧窗口挡住、鼠标无响应），再启动新进程并退出当前。"""
+        self._cleanup_icons()
         if self._input_win:
             try:
                 self._input_win[1].destroy()
@@ -2009,16 +2551,16 @@ class Pet:
         walking = self._is_walk_display(name)
         if walking and self.vx != 0:
             if name.startswith("walk_"):
-                if self.vx < 0:
-                    name += "_flip"   # 散步贴纸: 向左移动时水平翻转
+                if self.vx > 0:
+                    name += "_flip"   # 散步贴纸: 向右移动时水平翻转
             elif name.startswith("dance_"):
                 if self.vx > 0:
                     name += "_flip"   # 跳舞: 向右移动时水平翻转
             elif (self.walk_group
                     and (name == self.walk_group
                          or name.startswith(self.walk_group + "_"))
-                    and self.vx < 0):
-                name += "_flip"       # 散步贴纸: 向左移动时水平翻转
+                    and self.vx > 0):
+                name += "_flip"       # 散步贴纸: 向右移动时水平翻转
         if self.falling and walking:
             self.fi -= 1               # 冻结动画帧，只更新位置
         self.surface.update(self.composite(name), self.x, self.y, name)
@@ -2057,6 +2599,14 @@ class Pet:
             if self.vy >= 0 and self.y >= self._jump_y0:
                 self.jumping = False
                 self.vy = 0
+            self.falling = False
+            return
+        if IS_WIN and not self.at_home and (
+                self._kick_enabled or self._nav_target is not None):
+            # 踢图标模式（或正在完成最后一单搬运）：在桌面上不受重力影响，
+            # 不会因脚下没有黑色像素而掉落；关闭模式后恢复原来的重力下落
+            self.vy = 0
+            self._y_frac = 0.0
             self.falling = False
             return
         w, h = self.window_size()
@@ -2559,6 +3109,10 @@ class Pet:
         if getattr(self, "cake", None):
             menu.add_command(label="投喂",
                              command=free(self.cake.spawn_near_me))
+        if IS_WIN:
+            menu.add_checkbutton(label="踢图标模式",
+                                 variable=self._kick_mode_var,
+                                 command=self._toggle_kick_mode)
         menu.add_command(label="重启小白", command=self.restart_pet)
         menu.add_command(label="管理动作…", command=self.open_editor)
         menu.add_separator()
@@ -2592,6 +3146,7 @@ def main(auto_close_ms=None, test_mode=False, start_pos=None):
     try:
         root.mainloop()
     finally:
+        pet._cleanup_icons()
         if not test_mode:
             try:
                 if os.path.exists(LOCK_FILE):
