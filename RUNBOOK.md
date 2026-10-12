@@ -1,5 +1,11 @@
 # 小白桌宠运行说明
 
+## 分支与下载
+
+GitHub 默认分支 `main` 提供 Windows 版本，代码基线来自 `Windows` 分支 `0bff75b`。下载地址：<https://github.com/NuxusAurora/little-white/archive/refs/heads/main.zip>。解压后双击根目录的 `run.bat`。
+
+`Windows` 保留 Windows 基线；Linux 专用版本位于 `linux` 分支。旧 `main` 的本地备份引用及覆盖授权记录见 HANDOFF。
+
 ## 启动
 
 Windows 双击 `run.bat`。脚本优先使用 `%LOCALAPPDATA%\Python\pythoncore-3.14-64\pythonw.exe`，不存在时使用 PATH 中的 Python。

@@ -2,6 +2,7 @@
 
 ## Completed
 
+- 2026-10-11：本地 `main` 采用 `Windows` 分支 `0bff75b` 的代码基线，供默认下载使用；`_LayeredSurface.update(self, pil_rgba, x, y, name=None)` 已兼容启动时传入的帧名称。7 项回归测试全部通过。本次仅补充分支与交接说明，业务代码未新增修改。
 - 2026-10-03：按用户要求核验并提交原有全部 Git 改动，保留动作子目录及更新后的素材；既有改动来源未确认。
 - 用户要求的踢图标默认关闭已落实到状态和菜单变量。
 - 修复 Windows 64 位 VARIANT 大小、窗口句柄和 PIDL 指针参数；真实只读 COM 查询返回 43 个图标及其位置。
@@ -14,7 +15,6 @@
 
 ## Next
 
-- 如需同步到远端，先提供并配置 Git 仓库地址；目前无 remote，未推送。
 - 如需恢复跳舞或跳跃，请补充素材并核对配置；当前 `dance`、`jump` 虽在配置中启用但无对应素材。README 中部分旧交互描述不代表当前素材都可用，运行时会隐藏无素材菜单。
 
 ## Needs investigation
@@ -25,4 +25,6 @@
 
 ## Other
 
+- Git 远端 `origin` 已配置为 `git@github.com:NuxusAurora/little-white.git`。分发约定：默认 `main` 提供 Windows 版本；`Windows` 保留 Windows 基线，`linux` 保留 Linux 专用版本。分支与下载入口见 RUNBOOK。
+- 覆盖前的远端 `main` 提交 `20568d9a1a1643dba8e71b1b619ed6657b70b921` 已保留在本地备份分支 `codex/main-before-windows-20261011`。覆盖由用户明确授权，推送目标为 `origin/main`，使用绑定该旧提交的 `--force-with-lease` 防止覆盖同时发生的新提交。
 - 原有日志、锁、缓存及历史备份保持原样，未将本任务临时副本、截图或日志提交。
