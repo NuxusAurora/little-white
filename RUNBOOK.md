@@ -1,5 +1,7 @@
 # 小白桌宠运行说明
 
+Windows安装器与Linux `.deb` 的独立打包入口、网站下载及验证限制见[安装包说明](packaging/README.md)。候选保存在 `installer-artifacts/20261014/`，不覆盖源码、现用桌宠及用户配置。
+
 ## 分支与下载
 
 GitHub 默认分支 `main` 提供 Windows 版本，代码基线来自 `Windows` 分支 `0bff75b`。下载地址：<https://github.com/NuxusAurora/little-white/archive/refs/heads/main.zip>。解压后双击根目录的 `run.bat`。

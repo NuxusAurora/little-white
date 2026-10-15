@@ -3,3 +3,4 @@ __pycache__/
 .pet.lock
 _pet_test.log
 _pet_dbg.log
+installer-artifacts/

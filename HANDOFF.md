@@ -2,6 +2,8 @@
 
 ## Completed
 
+- 2026-10-14：Windows/main与origin/linux分别制作Windows自带运行环境安装器和Debian/Ubuntu .deb，网站工具页提供两个安装包下载入口。打包源码、资源/用户数据边界、下载路径及验收限制见[安装包说明](packaging/README.md)。7项既有回归、冻结Windows隔离启动检查、Linux语法及包结构检查通过；真实安装和Linux X11互动未验收。未改变用户现用桌宠。
+
 - 2026-10-11：本地 `main` 采用 `Windows` 分支 `0bff75b` 的代码基线，供默认下载使用；`_LayeredSurface.update(self, pil_rgba, x, y, name=None)` 已兼容启动时传入的帧名称。7 项回归测试全部通过。本次仅补充分支与交接说明，业务代码未新增修改。
 - 2026-10-03：按用户要求核验并提交原有全部 Git 改动，保留动作子目录及更新后的素材；既有改动来源未确认。
 - 用户要求的踢图标默认关闭已落实到状态和菜单变量。
